@@ -1,0 +1,259 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 220 20% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+
+    --primary: 187 62% 27%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 20% 10%;
+
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 10% 46%;
+
+    --accent: 220 14% 96%;
+    --accent-foreground: 220 20% 10%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 187 62% 27%;
+
+    --radius: 0.5rem;
+    
+    /* Tech Brand Colors - #1a656f */
+    --tech-primary: 187 62% 27%;
+    --tech-cyan: 187 50% 35%;
+    --tech-slate: 220 20% 10%;
+    --tech-gray: 220 14% 96%;
+    
+    /* Octomiro Brand Colors */
+    --octomiro-beige: 45 100% 97%;
+    --octomiro-teal: 187 62% 27%;
+    --octomiro-navy: 220 20% 10%;
+    --octomiro-orange: 25 95% 53%;
+    
+    /* Gradients */
+    --gradient-hero: linear-gradient(180deg, hsl(var(--background)) 0%, hsl(220 14% 96%) 100%);
+    --gradient-card: linear-gradient(135deg, hsl(0 0% 100%) 0%, hsl(220 14% 98%) 100%);
+    --gradient-glow: radial-gradient(circle at 50% 0%, hsl(var(--primary) / 0.1), transparent 50%);
+    --gradient-tech: linear-gradient(135deg, hsl(187 62% 27%) 0%, hsl(187 50% 35%) 100%);
+    
+    /* Shadows - sharper, more defined */
+    --shadow-soft: 0 1px 3px 0 hsl(220 20% 10% / 0.1), 0 1px 2px -1px hsl(220 20% 10% / 0.1);
+    --shadow-hover: 0 4px 6px -1px hsl(220 20% 10% / 0.1), 0 2px 4px -2px hsl(220 20% 10% / 0.1);
+    --shadow-glow: 0 0 20px hsl(187 62% 27% / 0.25);
+    
+    /* Animations */
+    --transition-smooth: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-bounce: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 240 5.3% 26.1%;
+
+    --sidebar-primary: 240 5.9% 10%;
+
+    --sidebar-primary-foreground: 0 0% 98%;
+
+    --sidebar-accent: 240 4.8% 95.9%;
+
+    --sidebar-accent-foreground: 240 5.9% 10%;
+
+    --sidebar-border: 220 13% 91%;
+
+    --sidebar-ring: 187 62% 27%;
+  }
+
+  .dark {
+    --background: 207 26% 22%;
+    --foreground: 0 0% 100%;
+
+    --card: 207 26% 26%;
+    --card-foreground: 0 0% 100%;
+
+    --popover: 207 26% 22%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 41 100% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 187 63% 27%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 207 26% 30%;
+    --muted-foreground: 0 0% 80%;
+
+    --accent: 207 26% 30%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 207 26% 35%;
+    --input: 207 26% 35%;
+    --ring: 41 100% 50%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+  
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display font-semibold tracking-tight;
+  }
+}
+
+@layer utilities {
+  .gradient-hero {
+    background: var(--gradient-hero);
+  }
+  
+  .gradient-card {
+    background: var(--gradient-card);
+  }
+  
+  .gradient-glow {
+    background: var(--gradient-glow);
+  }
+  
+  .shadow-soft {
+    box-shadow: var(--shadow-soft);
+  }
+  
+  .shadow-hover {
+    box-shadow: var(--shadow-hover);
+  }
+  
+  .shadow-glow {
+    box-shadow: var(--shadow-glow);
+  }
+  
+  .transition-smooth {
+    transition: var(--transition-smooth);
+  }
+  
+  .transition-bounce {
+    transition: var(--transition-bounce);
+  }
+  
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+  
+  @keyframes float {
+    0%, 100% {
+      transform: translateY(0px);
+    }
+    50% {
+      transform: translateY(-20px);
+    }
+  }
+  
+  .animate-slide-up {
+    animation: slideUp 0.6s ease-out;
+  }
+  
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(30px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .animate-fade-in {
+    animation: fadeIn 0.8s ease-out;
+  }
+  
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .modal-scroll-shell {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .modal-scroll-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-right: 10px;
+    scrollbar-gutter: stable;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(148, 163, 184, 0.82) transparent;
+  }
+
+  .modal-scroll-area::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .modal-scroll-area::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .modal-scroll-area::-webkit-scrollbar-thumb {
+    background: rgba(148, 163, 184, 0.82);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  .modal-scroll-area:hover::-webkit-scrollbar-thumb {
+    background: rgba(100, 116, 139, 0.92);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+}

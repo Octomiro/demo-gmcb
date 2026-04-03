@@ -1,0 +1,42 @@
+# ── Secrets & local environment ──
+.env
+.env.local
+.env.*.local
+
+# ── ML model weights (large binaries — store separately) ──
+backend/*.pth
+backend/*.pt
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# ── Backup files ──
+*.bak
+*.bak.*
+
+# ── Runtime data / volumes ──
+data/liveImages/*
+!data/liveImages/.gitkeep
+data/postgres/
+
+# ── Logs & reports ──
+backend/perf_snapshots.txt
+backend/*.log
+
+# ── Node / frontend ──
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+*.local
+
+# ── OS ──
+.DS_Store
+Thumbs.db

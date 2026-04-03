@@ -1,0 +1,77 @@
+services:
+
+  # ════════════════════════════════════════
+  # Database  
+  # ════════════════════════════════════════
+  db:
+    image: postgres:16
+    container_name: gmcb_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DB_NAME}
+      POSTGRES_USER:     ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/db_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ════════════════════════════════════════
+  # Backend  (Flask + YOLO + EfficientAD)
+  # ════════════════════════════════════════
+  backend:
+    build: ./backend
+    container_name: gmcb_backend
+    restart: unless-stopped
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      - LIVE_IMAGES_ROOT=/app/liveImages
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+
+    devices:
+      - /dev/video2:/dev/video2
+      - /dev/video3:/dev/video3
+    group_add:
+      - video                       
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    volumes:
+      - ./data/liveImages:/app/liveImages     # proof images (persist across restarts)
+
+  # ════════════════════════════════════════
+  # Frontend 
+  # ════════════════════════════════════════
+  frontend:
+    build: ./frontend
+    container_name: gmcb_frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+
+volumes:
+  pgdata:
