@@ -72,6 +72,7 @@ export interface FeedbackDraft {
   date: string;
   sessionId: string;
   urgency: string;
+  screenshot: File | null;
 }
 
 // ─── Utility Functions ────────────────────────────────────────────────────────
@@ -699,5 +700,5 @@ export const CURRENT_SESSION: SessionData = {
 export const FILTER_TABS = ["Tous", "Anomalie", "Date", "Code à barre"];
 
 export function createFeedbackDraft(): FeedbackDraft {
-  return { title: "", comment: "", type: "bug", scope: "global", date: todayIso(), sessionId: "", urgency: "medium" };
+  return { title: "", comment: "", type: "bug", scope: "global", date: todayIso(), sessionId: "", urgency: "medium", screenshot: null };
 }

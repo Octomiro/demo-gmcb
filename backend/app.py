@@ -387,9 +387,20 @@ def api_session_stop():
 
 @app.route('/api/session/status')
 def api_session_status():
+    from scheduler import _preemption_lock, _preemption_event
+    import scheduler as _sched_mod
+
     any_running = any(st.is_running for _, st in _all_states())
     any_recording = any(getattr(st, '_stats_active', False) for _, st in _all_states())
     guard_stale = pipeline_manager._active_session_source is not None and not any_running and not any_recording
+
+    # Pop preemption event (consumed once by frontend)
+    preemption = None
+    with _preemption_lock:
+        if _sched_mod._preemption_event is not None:
+            preemption = _sched_mod._preemption_event
+            _sched_mod._preemption_event = None
+
     return jsonify({
         "active": pipeline_manager._active_session_source is not None,
         "source": pipeline_manager._active_session_source,
@@ -398,6 +409,7 @@ def api_session_status():
         "any_running": any_running,
         "any_recording": any_recording,
         "guard_stale": guard_stale,
+        "preemption": preemption,
     })
 
 
@@ -525,6 +537,14 @@ def api_stats_session_crossings(session_id):
     return jsonify({"crossings": rows})
 
 
+@app.route('/api/stats/session/<session_id>/hourly')
+def api_stats_session_hourly(session_id):
+    if db_writer is None:
+        return jsonify({"hourly_stats": []})
+    stats = db_writer.get_hourly_stats(session_id)
+    return jsonify({"hourly_stats": stats})
+
+
 # ==========================
 # PROOF IMAGES
 # ==========================
@@ -648,6 +668,7 @@ def api_cameras():
 def api_cameras_detect():
     """Probe /dev/video* devices and report which ones OpenCV can open."""
     import glob
+    from tracking_config import CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT
     devices = sorted(glob.glob("/dev/video*"))
     results = []
     for dev in devices:
@@ -656,10 +677,15 @@ def api_cameras_detect():
             idx = int(dev.replace("/dev/video", ""))
         except ValueError:
             continue
-        cap = cv2.VideoCapture(idx)
+        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
         opened = cap.isOpened()
         width = height = fps = None
         if opened:
+            # Apply the same settings the pipeline uses so we report actual negotiated values
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
             width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps    = cap.get(cv2.CAP_PROP_FPS)
@@ -894,6 +920,13 @@ def _time_to_minutes(value):
     return int(hours) * 60 + int(minutes)
 
 
+def _times_overlap(s1, e1, s2, e2):
+    """Return True if [s1, e1) and [s2, e2) overlap (HH:MM strings)."""
+    a0, a1 = _time_to_minutes(s1), _time_to_minutes(e1)
+    b0, b1 = _time_to_minutes(s2), _time_to_minutes(e2)
+    return a0 < b1 and b0 < a1
+
+
 def _one_off_start_already_passed(date_iso, start_time):
     now_tn = datetime.now(_TUNIS_TZ)
     today_tn = now_tn.date().isoformat()
@@ -952,14 +985,35 @@ def api_shifts_create():
     for s in existing:
         if s.get("type", "recurring") != "recurring":
             continue
+        try:
+            ex_days = set(json.loads(s["days_of_week"]))
+        except Exception:
+            ex_days = set()
+        shared = new_days & ex_days
+        if not shared:
+            continue
+        # Exact duplicate check
         if s["start_time"] == start_time and s["end_time"] == end_time:
-            try:
-                ex_days = set(json.loads(s["days_of_week"]))
-            except Exception:
-                ex_days = set()
-            shared = new_days & ex_days
-            if shared:
-                return jsonify({"error": f"Un shift identique existe déjà : {s['label']} ({start_time}–{end_time})"}), 409
+            return jsonify({"error": f"Un shift identique existe déjà : {s['label']} ({start_time}–{end_time})"}), 409
+        # Time-range overlap check
+        if _times_overlap(start_time, end_time, s["start_time"], s["end_time"]):
+            shared_days = ", ".join(sorted(shared))
+            # Build suggestions
+            suggestions = []
+            if _time_to_minutes(start_time) < _time_to_minutes(s["end_time"]):
+                suggestions.append(f"commencer a partir de {s['end_time']}")
+            if _time_to_minutes(end_time) > _time_to_minutes(s["start_time"]):
+                suggestions.append(f"terminer avant {s['start_time']}")
+            hint = " ou ".join(suggestions)
+            return jsonify({
+                "error": f"Chevauchement avec le shift \u00ab {s['label']} \u00bb "
+                         f"({s['start_time']}\u2013{s['end_time']}) "
+                         f"les jours : {shared_days}. "
+                         f"Suggestion : {hint}.",
+                "overlap_with": s["label"],
+                "overlap_start": s["start_time"],
+                "overlap_end": s["end_time"],
+            }), 409
     shift = {
         "id": str(uuid.uuid4()),
         "label": label,
@@ -1178,6 +1232,57 @@ def api_one_off_create():
         return jsonify({"error": "L'heure de début doit être avant l'heure de fin"}), 400
     if _one_off_start_already_passed(date, start_time):
         return jsonify({"error": "Impossible de créer un shift ponctuel si son heure de début est déjà passée"}), 400
+
+    # ── Overlap check: recurring shifts on that day-of-week ──
+    from datetime import date as _date_cls
+    try:
+        target_dow = _date_cls.fromisoformat(date).strftime("%a").lower()[:3]
+    except ValueError:
+        target_dow = ""
+    if target_dow:
+        for s in (db_writer.get_all_shifts() or []):
+            if s.get("type") == "one_off":
+                continue
+            if not s.get("active"):
+                continue
+            try:
+                ex_days = set(d.lower()[:3] for d in json.loads(s["days_of_week"]))
+            except Exception:
+                ex_days = set()
+            if target_dow not in ex_days:
+                continue
+            if _times_overlap(start_time, end_time, s["start_time"], s["end_time"]):
+                suggestions = []
+                if _time_to_minutes(start_time) < _time_to_minutes(s["end_time"]):
+                    suggestions.append(f"commencer à partir de {s['end_time']}")
+                if _time_to_minutes(end_time) > _time_to_minutes(s["start_time"]):
+                    suggestions.append(f"terminer avant {s['start_time']}")
+                hint = " ou ".join(suggestions)
+                return jsonify({
+                    "error": f"Chevauchement avec le shift récurrent « {s['label']} » "
+                             f"({s['start_time']}–{s['end_time']}) le {date}. "
+                             f"Suggestion : {hint}."
+                }), 409
+
+    # ── Overlap check: other one-offs on the same date ──
+    for oo in (db_writer.get_all_one_off_sessions() or []):
+        if oo.get("session_date") != date and oo.get("date") != date:
+            continue
+        oo_start = oo.get("start_time", "")
+        oo_end = oo.get("end_time", "")
+        if oo_start and oo_end and _times_overlap(start_time, end_time, oo_start, oo_end):
+            suggestions = []
+            if _time_to_minutes(start_time) < _time_to_minutes(oo_end):
+                suggestions.append(f"commencer à partir de {oo_end}")
+            if _time_to_minutes(end_time) > _time_to_minutes(oo_start):
+                suggestions.append(f"terminer avant {oo_start}")
+            hint = " ou ".join(suggestions)
+            return jsonify({
+                "error": f"Chevauchement avec « {oo.get('label', 'session')} » "
+                         f"({oo_start}–{oo_end}) le {date}. "
+                         f"Suggestion : {hint}."
+            }), 409
+
     import datetime as _dt
     session = {
         "id": str(uuid.uuid4()),
@@ -1286,6 +1391,12 @@ if __name__ == '__main__':
         cleanup_old_proof_images,
         CronTrigger(hour=3, minute=0, timezone="Africa/Tunis"),
         id="cleanup_proof_images", replace_existing=True,
+    )
+    from auth import run_screenshot_cleanup
+    scheduler.add_job(
+        run_screenshot_cleanup,
+        CronTrigger(hour=3, minute=30, timezone="Africa/Tunis"),
+        id="cleanup_screenshots", replace_existing=True,
     )
     scheduler.start()
     cleanup_old_proof_images()

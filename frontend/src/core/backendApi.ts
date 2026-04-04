@@ -279,6 +279,77 @@ export const exitLineApi = {
   },
 };
 
+// ─── Feedback endpoints ───────────────────────────────────────────────────────
+
+export const feedbackApi = {
+  create(payload: { title: string; comment: string; type: string; scope: string; urgency: string; sessionId?: string | null; screenshot?: File | null }) {
+    const token = localStorage.getItem("auth_token");
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+
+    if (payload.screenshot) {
+      const fd = new FormData();
+      fd.append("title", payload.title);
+      fd.append("comment", payload.comment);
+      fd.append("type", payload.type);
+      fd.append("scope", payload.scope);
+      fd.append("urgency", payload.urgency);
+      if (payload.sessionId) fd.append("sessionId", payload.sessionId);
+      fd.append("screenshot", payload.screenshot);
+      return fetch(`${BASE}/feedback`, { method: "POST", headers, body: fd }).then((r) => {
+        if (!r.ok) throw new Error(`POST /feedback → ${r.status}`);
+        return r.json();
+      });
+    }
+
+    return fetch(`${BASE}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(payload),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`POST /feedback → ${r.status}`);
+      return r.json();
+    });
+  },
+
+  list(limit = 200) {
+    const token = localStorage.getItem("auth_token");
+    return fetch(`${BASE}/feedback?limit=${limit}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }).then((r) => {
+      if (!r.ok) throw new Error(`GET /feedback → ${r.status}`);
+      return r.json() as Promise<{ feedbacks: any[] }>;
+    });
+  },
+
+  mine() {
+    const token = localStorage.getItem("auth_token");
+    return fetch(`${BASE}/feedback/mine`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }).then((r) => {
+      if (!r.ok) throw new Error(`GET /feedback/mine → ${r.status}`);
+      return r.json() as Promise<{ feedbacks: any[] }>;
+    });
+  },
+
+  screenshotUrl(feedbackId: number) {
+    const token = localStorage.getItem("auth_token");
+    // Append token as query param since browser img src doesn't support custom headers
+    return `${BASE}/feedback/${feedbackId}/screenshot?t=${encodeURIComponent(token ?? "")}`;
+  },
+
+  respond(feedbackId: number, response: string) {
+    const token = localStorage.getItem("auth_token");
+    return fetch(`${BASE}/feedback/${feedbackId}/response`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ response }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`POST /feedback/${feedbackId}/response → ${r.status}`);
+      return r.json();
+    });
+  },
+};
+
 // ─── Convenience facade ───────────────────────────────────────────────────────
 // Single object for consumer pages so they can call backendApi.* uniformly.
 
@@ -360,4 +431,12 @@ export const backendApi = {
       clearTimeout(timer);
     }
   },
+
+  // ── Feedback ──────────────────────────────────────────────────────────────
+  submitFeedback: (payload: { title: string; comment: string; type: string; scope: string; urgency: string; sessionId?: string | null; screenshot?: File | null }) =>
+    feedbackApi.create(payload),
+  listFeedbacks: (limit = 200) => feedbackApi.list(limit),
+  listMyFeedbacks: () => feedbackApi.mine(),
+  feedbackScreenshotUrl: (id: number) => feedbackApi.screenshotUrl(id),
+  respondToFeedback: (id: number, response: string) => feedbackApi.respond(id, response),
 };
