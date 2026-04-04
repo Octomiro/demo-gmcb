@@ -44,7 +44,7 @@ CHECKPOINTS = [
         #   zone_end_pct   = ENTRY line (right side, where scanning begins)
         #   zone_start_pct = EXIT  line (left side, decision is locked & queued)
         "zone_start_pct": 0.20,
-        "zone_end_pct":   0.60,
+        "zone_end_pct":   0.80,
     },
 ]
 

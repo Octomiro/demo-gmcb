@@ -545,6 +545,26 @@ def api_stats_session_hourly(session_id):
     return jsonify({"hourly_stats": stats})
 
 
+@app.route('/api/stats/session/<session_id>', methods=['DELETE'])
+def api_delete_stats_session(session_id):
+    if db_writer is None:
+        return jsonify({"error": "db_writer not available"}), 503
+    deleted_ids = db_writer.delete_stats_session(session_id)
+    if not deleted_ids:
+        return jsonify({"error": "Session introuvable ou erreur de suppression"}), 404
+    # Remove proof image folders for every individual session in the group
+    import shutil
+    from helpers import LIVE_IMAGES_ROOT
+    for sid in deleted_ids:
+        folder = LIVE_IMAGES_ROOT / sid
+        if folder.exists():
+            try:
+                shutil.rmtree(folder)
+            except Exception as e:
+                print(f"[DELETE] Could not remove proof folder {folder}: {e}")
+    return jsonify({"deleted": session_id, "session_ids": deleted_ids})
+
+
 # ==========================
 # PROOF IMAGES
 # ==========================
@@ -652,6 +672,68 @@ def api_rotate():
         return jsonify({"error": "no active pipeline"}), 404
     deg = state.cycle_rotation_ccw()
     return jsonify({"rotation_deg": deg})
+
+
+# ==========================
+# EXIT-LINE CONTROLS
+# ==========================
+
+@app.route('/api/exit_line', methods=['POST'])
+def api_exit_line_toggle():
+    """Toggle the exit-line overlay on/off."""
+    state = _view_state()
+    if state is None:
+        return jsonify({"error": "no active pipeline"}), 404
+    state._exit_line_enabled = not state._exit_line_enabled
+    return jsonify({"enabled": state._exit_line_enabled})
+
+
+@app.route('/api/exit_line_position', methods=['POST'])
+def api_exit_line_position():
+    """Set exit-line position as a percentage (5-95)."""
+    state = _view_state()
+    if state is None:
+        return jsonify({"error": "no active pipeline"}), 404
+    data = request.get_json(silent=True) or {}
+    pct = max(5, min(95, int(data.get("position", state._exit_line_pct))))
+    state._exit_line_pct = pct
+    # For anomaly mode, also update the checkpoint's zone_end_pct
+    # (read every frame by _process_anomaly_frame)
+    if state.mode == "anomaly" and state.current_checkpoint:
+        state.current_checkpoint["zone_end_pct"] = pct / 100.0
+    state._recompute_exit_line_y()
+    with state._overlay_lock:
+        state._overlay['exit_line_y'] = state._exit_line_y
+    return jsonify({"position_pct": pct, "exit_line_y": state._exit_line_y})
+
+
+@app.route('/api/exit_line_orientation', methods=['POST'])
+def api_exit_line_orientation():
+    """Toggle exit-line between vertical and horizontal."""
+    state = _view_state()
+    if state is None:
+        return jsonify({"error": "no active pipeline"}), 404
+    state._exit_line_vertical = not state._exit_line_vertical
+    state._recompute_exit_line_y()
+    with state._overlay_lock:
+        state._overlay['exit_line_y'] = state._exit_line_y
+    return jsonify({
+        "vertical": state._exit_line_vertical,
+        "orientation": "vertical" if state._exit_line_vertical else "horizontal",
+    })
+
+
+@app.route('/api/exit_line_invert', methods=['POST'])
+def api_exit_line_invert():
+    """Toggle exit-line direction (normal / inverted)."""
+    state = _view_state()
+    if state is None:
+        return jsonify({"error": "no active pipeline"}), 404
+    state._exit_line_inverted = not state._exit_line_inverted
+    state._recompute_exit_line_y()
+    with state._overlay_lock:
+        state._overlay['exit_line_y'] = state._exit_line_y
+    return jsonify({"inverted": state._exit_line_inverted})
 
 
 @app.route('/api/checkpoints')
@@ -813,6 +895,10 @@ def api_pipeline_stats(pipeline_id):
     s["nok_anomaly"] = getattr(st, '_nok_anomaly', 0)
     s["fifo_queue"] = list(st.output_fifo)[-20:] if hasattr(st, 'output_fifo') else []
     s["perf"] = perf
+    s["exit_line_enabled"] = st._exit_line_enabled
+    s["exit_line_pct"] = st._exit_line_pct
+    s["exit_line_vertical"] = st._exit_line_vertical
+    s["exit_line_inverted"] = st._exit_line_inverted
     # Real DB connectivity check (lightweight SELECT 1)
     if db_writer is not None:
         h = db_writer.health()

@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import {
   History, Calendar, TrendingUp, Download, ChevronLeft, ChevronRight,
   Eye, BarChart2, ArrowLeft, CheckCircle2, AlertCircle, Camera, Timer,
-  Filter, MessageSquare, Flag, Loader2, TriangleAlert,
+  Filter, MessageSquare, Flag, Loader2, TriangleAlert, Trash2,
 } from "lucide-react";
 import {
   FILTER_TABS, formatHistoryDate, getHistoryPeriodLabel, getSessionsForDate,
@@ -16,6 +16,7 @@ import {
 } from "./gmcbComponents";
 import { X, Clock } from "lucide-react";
 import { useGMCBFeedback } from "@/contexts/GMCBFeedbackContext";
+import { useGMCBAuth } from "@/contexts/GMCBAuthContext";
 import { useSessionHistory, type DaySummary, type Session } from "@/hooks/useSessionHistory";
 import { backendApi } from "@/core/backendApi";
 import { useShifts } from "@/hooks/useShifts";
@@ -38,6 +39,8 @@ const GMCBHistorique = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { openFeedbackModal } = useGMCBFeedback();
+  const { user } = useGMCBAuth();
+  const isAdmin = user?.role === "admin" || user?.role === "super_admin";
   const { days, loading: histLoading, error: histError, refetch } = useSessionHistory();
   const [histView, setHistView] = useState("week");
   const [customRange, setCustomRange] = useState<{ start: string; end: string } | null>(null);
@@ -346,6 +349,7 @@ const GMCBHistorique = () => {
           daySummary={selectedDay}
           defectLabel={defectLabel}
           dayModalOrigin={dayModalOrigin}
+          canDelete={isAdmin}
           onClose={() => setSelectedDay(null)}
           onBackToCalendar={() => { setSelectedDay(null); setCalendarModalOpen(true); }}
           onSessionClick={(session) => { setSelectedDay(null); setSessionDetailView({ session, daySummary: selectedDay }); }}
@@ -360,7 +364,7 @@ const GMCBHistorique = () => {
 
 // ─── Day Detail Modal (inline, uses DaySummary) ──────────────────────────────
 
-export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose, onBackToCalendar, onSessionClick, openFeedbackModal }: {
+export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose, onBackToCalendar, onSessionClick, openFeedbackModal, canDelete }: {
   daySummary: DaySummary;
   defectLabel: (t: string) => string;
   dayModalOrigin: string;
@@ -368,12 +372,34 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
   onBackToCalendar: () => void;
   onSessionClick: (session: Session) => void;
   openFeedbackModal: (preset?: Record<string, string>) => void;
+  canDelete?: boolean;
 }) {
   const [viewMode, setViewMode] = useState("all");
   const [statsMetric, setStatsMetric] = useState<"conformite" | "paquets" | "anomalies">("conformite");
   const [statsHoveredIdx, setStatsHoveredIdx] = useState<number | null>(null);
   const [interruptionTooltipSessionId, setInterruptionTooltipSessionId] = useState<string | null>(null);
   const [interruptionTooltipPlacement, setInterruptionTooltipPlacement] = useState<"top" | "bottom">("bottom");
+  const [localSessions, setLocalSessions] = useState(() => daySummary.sessions);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; label: string; startH: string; endH: string } | null>(null);
+
+  const handleDeleteSession = async () => {
+    if (!deleteTarget) return;
+    const { id, label, startH, endH } = deleteTarget;
+    setDeleteTarget(null);
+    setDeletingId(id);
+    try {
+      await backendApi.deleteSession(id);
+      setLocalSessions((prev) => prev.filter((s) => s.id !== id));
+      const { toast } = await import("sonner");
+      toast.success(`${label} supprimée (${startH} – ${endH}). Les statistiques ont été retirées.`, { duration: 6000 });
+    } catch {
+      const { toast } = await import("sonner");
+      toast.error(`Impossible de supprimer ${label}. Réessayez.`);
+    } finally {
+      setDeletingId(null);
+    }
+  };
   const { shifts } = useShifts();
   const { oneOffSessions } = useOneOffSessions();
   const dayLabel = formatAdminDate(daySummary.date, { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
@@ -540,8 +566,8 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
           )}
           {viewMode === "sessions" && (
             <div>
-              {daySummary.sessions.map((s, i) => {
-                const sessionNum = daySummary.sessions.length - i;
+              {localSessions.map((s, i) => {
+                const sessionNum = localSessions.length - i;
                 const total = s.total ?? 0;
                 const nok = (s.nok_no_barcode ?? 0) + (s.nok_no_date ?? 0) + (s.nok_anomaly ?? 0);
                 const pct = total > 0 ? +((s.ok_count / total) * 100).toFixed(2) : 0;
@@ -667,6 +693,16 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
                         <button onClick={() => openFeedbackModal({ scope: "session", sessionId: s.id, date: daySummary.date })} title="Signaler un problème" style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderRadius: 8, border: "1px solid #fde68a", background: "#fffbeb", color: "#92400e", fontSize: 13, cursor: "pointer" }}>
                           <Flag size={14} />
                         </button>
+                        {canDelete && (
+                          <button
+                            onClick={() => setDeleteTarget({ id: s.id, label: `Session ${sessionNum}`, startH, endH })}
+                            disabled={deletingId === s.id}
+                            title="Supprimer cette session"
+                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", borderRadius: 8, border: "1px solid #fecaca", background: "#fff5f5", color: "#dc2626", fontSize: 13, cursor: deletingId === s.id ? "wait" : "pointer", opacity: deletingId === s.id ? 0.6 : 1 }}
+                          >
+                            {deletingId === s.id ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Trash2 size={14} />}
+                          </button>
+                        )}
                       </div>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8 }}>
@@ -870,6 +906,34 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
           </div>
         </div>
       </div>
+
+      {/* ── Delete confirmation modal ── */}
+      {deleteTarget && (
+        <div onClick={() => setDeleteTarget(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, width: 420, maxWidth: "94vw", padding: "28px 28px 24px", boxShadow: "0 24px 60px rgba(0,0,0,0.22)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+              <div style={{ width: 42, height: 42, borderRadius: 12, background: "#fef2f2", border: "1px solid #fecaca", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Trash2 size={20} color="#dc2626" />
+              </div>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 16, color: "#0f172a" }}>Supprimer {deleteTarget.label} ?</div>
+                <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 2 }}>{deleteTarget.startH} – {deleteTarget.endH}</div>
+              </div>
+            </div>
+            <p style={{ fontSize: 13, color: "#64748b", margin: "0 0 24px", lineHeight: 1.6 }}>
+              Cette action est <strong style={{ color: "#dc2626" }}>irréversible</strong>. Toutes les statistiques et données de détection associées à cette session seront définitivement supprimées.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setDeleteTarget(null)} style={{ padding: "9px 18px", borderRadius: 8, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#475569", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                Annuler
+              </button>
+              <button onClick={handleDeleteSession} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: "#dc2626", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+                <Trash2 size={14} /> Supprimer définitivement
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

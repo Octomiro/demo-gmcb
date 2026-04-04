@@ -918,6 +918,49 @@ class DBWriter:
         finally:
             self._release_pg_conn(conn)
 
+    def delete_stats_session(self, session_id):
+        """Hard-delete a stats session group and all its associated data.
+
+        session_id may be either an individual session id or a group_id —
+        both cases are covered so that the grouped view works correctly.
+
+        Returns the list of individual session UUIDs that were deleted,
+        so the caller can clean up proof image folders.
+        """
+        if not self._available or not session_id:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor() as cur:
+                # Collect all individual session IDs in this group
+                cur.execute(
+                    "SELECT id FROM sessions WHERE id = %s OR group_id = %s",
+                    (session_id, session_id),
+                )
+                ids = [row[0] for row in cur.fetchall()]
+                if not ids:
+                    return []
+                # Delete defective_packets first (FK constraint)
+                cur.execute(
+                    "DELETE FROM defective_packets WHERE session_id IN "
+                    "(SELECT id FROM sessions WHERE id = %s OR group_id = %s)",
+                    (session_id, session_id),
+                )
+                # Delete all session rows belonging to this group
+                cur.execute(
+                    "DELETE FROM sessions WHERE id = %s OR group_id = %s",
+                    (session_id, session_id),
+                )
+            conn.commit()
+            return ids
+        except Exception as e:
+            print(f"[DBWriter] delete_stats_session error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
     def delete_one_off_session(self, session_id):
         """Delete a one-off session from the unified shifts table."""
         if not self._available or not session_id:
