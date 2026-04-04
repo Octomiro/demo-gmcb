@@ -295,6 +295,14 @@ export const backendApi = {
   // Video feed URL — direct to Flask backend (bypasses Vite proxy for lower latency)
   videoFeedUrl: () => `/video_feed`,
 
+  // Camera config (from tracking_config) + live device probe
+  listCameras: (): Promise<{ cameras: Array<{ id: string; label: string; source: number | string }> }> =>
+    request("GET", "/cameras"),
+  detectCameras: (): Promise<{
+    detected: Array<{ device: string; index: number; available: boolean; width: number | null; height: number | null; fps: number | null }>;
+    pipeline_sources: Record<string, number | string>;
+  }> => request("GET", "/cameras/detect"),
+
   // Session crossings
   getCrossings: (sessionId: string, limit = 10) => statsApi.getCrossings(sessionId, limit),
 

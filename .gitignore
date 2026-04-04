@@ -24,6 +24,7 @@ venv/
 # ── Runtime data / volumes ──
 data/liveImages/*
 !data/liveImages/.gitkeep
+data/videos/*
 data/postgres/
 
 # ── Logs & reports ──

@@ -10,7 +10,7 @@ from pipeline_manager import db_writer
 
 auth_bp = Blueprint("auth", __name__)
 
-_JWT_SECRET = os.environ.get("JWT_SECRET", "891bb4393eabe70959404b6da33e67126800c47070465b65fd417d149f01d117")
+_JWT_SECRET = os.environ.get("JWT_SECRET") or _secrets.token_hex(32)
 _JWT_ALGORITHM = "HS256"
 _JWT_EXPIRY_HOURS = 24
 

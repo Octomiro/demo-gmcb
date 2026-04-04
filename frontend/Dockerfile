@@ -4,11 +4,10 @@ FROM node:20 AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY . .
 
-# Empty VITE_BACKEND_HOST → frontend uses relative URLs (nginx proxies to backend)
 ENV VITE_BACKEND_HOST=""
 RUN npm run build
 

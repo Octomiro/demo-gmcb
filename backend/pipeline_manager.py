@@ -7,7 +7,7 @@ from tracking_config import (
     CONFIG, DEVICE, PIPELINES, DEFAULT_VIEW_PIPELINE,
     CHECKPOINTS, get_checkpoint,
 )
-from tracking_state import TrackingState
+from detection import TrackingState
 from db_writer import DBWriter
 
 
