@@ -316,8 +316,20 @@ const GMCBAdmin = () => {
         endDate: ruleDraft.endDate,
         weekdays: sortWeekdays(ruleDraft.weekdays),
       });
-    } catch {
-      toast.error("Impossible de créer le shift. Réessayez.");
+    } catch (err: any) {
+      const raw = err?.message || "";
+      // Extract backend JSON error from thrown message like '...409: {"error":"..."}'
+      try {
+        const jsonStr = raw.substring(raw.indexOf("{"));
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.error) {
+          toast.error(parsed.error, { duration: 8000 });
+        } else {
+          toast.error("Impossible de créer le shift. Réessayez.");
+        }
+      } catch {
+        toast.error("Impossible de créer le shift. Réessayez.");
+      }
       return;
     }
     toast.success("Shift créé avec succès.");
@@ -358,10 +370,16 @@ const GMCBAdmin = () => {
       setSingleDraft(getDefaultSingleDraft(selectedDate));
       setSingleModalOpen(false);
     } catch (e) {
-      const msg = (e as Error).message || "";
-      if (msg.toLowerCase().includes("passée") || msg.toLowerCase().includes("past")) {
-        toast.error("Création refusée : l'heure de début est déjà passée.");
-      } else {
+      const raw = (e as Error).message || "";
+      try {
+        const jsonStr = raw.substring(raw.indexOf("{"));
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.error) {
+          toast.error(parsed.error, { duration: 8000 });
+        } else {
+          toast.error("Impossible de créer le créneau. Réessayez.");
+        }
+      } catch {
         toast.error("Impossible de créer le créneau. Réessayez.");
       }
     }
@@ -950,9 +968,6 @@ const GMCBAdmin = () => {
                     {session.disabled && <div style={{ fontSize: 12, color: "#dc2626", fontWeight: 700, marginTop: 6 }}>Désactivée pour cette date</div>}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "nowrap", whiteSpace: "nowrap" }}>
-                    {!sessionReadOnly && !sessionInProgress && !session.disabled && (
-                      <button onClick={() => startSession()} disabled={sessionLoading} style={{ border: "none", borderRadius: 8, padding: "6px 10px", background: "#0f766e", color: "#fff", fontSize: 12, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: sessionLoading ? 0.6 : 1 }}><Play size={14} />Démarrer</button>
-                    )}
                     {sessionReadOnly ? (
                       <div style={{ border: "1px solid #bbf7d0", background: "#f0fdf4", color: "#166534", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700 }}>Terminé</div>
                     ) : sessionInProgress ? (

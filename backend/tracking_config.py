@@ -122,7 +122,7 @@ SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
 
 # ==========================
-DETECTOR_FRAME_SKIP = 1
+DETECTOR_FRAME_SKIP = 2
 
 #(segmentation + EfficientAD),
 ANOMALY_FRAME_SKIP = 3

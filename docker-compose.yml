@@ -44,6 +44,7 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - LIVE_IMAGES_ROOT=/app/liveImages
+      - SCREENSHOTS_DIR=/app/feedback_screenshots
     depends_on:
       db:
         condition: service_healthy
@@ -57,6 +58,7 @@ services:
     volumes:
       - ./data/liveImages:/app/liveImages
       - ./data/videos:/app/videos
+      - ./data/feedback_screenshots:/app/feedback_screenshots
     deploy:
       resources:
         reservations:

@@ -1,11 +1,11 @@
 // ─── GMCB Shared UI Components ────────────────────────────────────────────────
 // Reusable components used across GMCB pages (QualiteLive, Historique, Admin)
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import {
   X, ChevronRight, ChevronLeft, Download, Calendar,
   CheckCircle2, AlertCircle, Camera, Clock, TrendingUp,
-  Eye, Timer, Flag, Plus, ArrowLeft,
+  Eye, Timer, Flag, Plus, ArrowLeft, Paperclip, ImageIcon,
 } from "lucide-react";
 import {
   type AnomalyItem, type DayData, type SessionData, type FeedbackItem, type FeedbackDraft,
@@ -197,6 +197,24 @@ export function FeedbackModal({ draft, onChange, onClose, onSubmit }: {
   onClose: () => void;
   onSubmit: () => void;
 }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null;
+    if (file) {
+      onChange({ ...draft, screenshot: file });
+      const url = URL.createObjectURL(file);
+      setPreviewUrl(url);
+    }
+  }
+
+  function clearScreenshot() {
+    onChange({ ...draft, screenshot: null });
+    setPreviewUrl(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 20, width: 480, maxWidth: "95vw", maxHeight: "calc(100vh - 48px)", overflow: "hidden", boxShadow: "0 32px 80px rgba(0,0,0,0.3)", display: "flex", flexDirection: "column" }}>
@@ -238,6 +256,27 @@ export function FeedbackModal({ draft, onChange, onClose, onSubmit }: {
             <div>
               <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6, fontWeight: 600 }}>Commentaire</div>
               <textarea value={draft.comment} onChange={(e) => onChange({ ...draft, comment: e.target.value })} placeholder="Expliquez le problème ou la suggestion" style={{ width: "100%", minHeight: 100, padding: "10px 12px", borderRadius: 8, border: "1px solid #d0d5dd", fontSize: 13, resize: "vertical", boxSizing: "border-box" }} />
+            </div>
+            {/* Screenshot upload */}
+            <div>
+              <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6, fontWeight: 600 }}>Capture d'écran <span style={{ fontWeight: 400, color: "#94a3b8" }}>(optionnel)</span></div>
+              {previewUrl ? (
+                <div style={{ position: "relative" }}>
+                  <img src={previewUrl} alt="preview" style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderRadius: 10, border: "1px solid #e2e8f0" }} />
+                  <button onClick={clearScreenshot} style={{ position: "absolute", top: 6, right: 6, width: 26, height: 26, borderRadius: "50%", background: "rgba(15,23,42,0.7)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff" }}>
+                    <X size={13} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{ width: "100%", padding: "14px 12px", borderRadius: 10, border: "1.5px dashed #d0d5dd", background: "#f8fafc", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, color: "#64748b", fontSize: 13 }}
+                >
+                  <Paperclip size={15} />
+                  <span>Joindre une image</span>
+                </button>
+              )}
+              <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFileChange} />
             </div>
           </div>
         </div>

@@ -1,6 +1,6 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useSidebar } from "@/components/ui/sidebar";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { backendApi } from "@/core/backendApi";
 import { toast } from "sonner";
 import {
@@ -24,6 +24,7 @@ import {
   MessageSquare,
   LogOut,
   ArrowLeft,
+  Inbox,
 } from "lucide-react";
 import logoOctomiro from "@/assets/logo-octomiro.webp";
 import logoOctoNorm from "@/assets/logo-octonorm.webp";
@@ -49,16 +50,30 @@ export function GMCBSidebar() {
   const { open } = useSidebar();
   const location = useLocation();
   const currentPath = location.pathname;
-  const { signOut } = useGMCBAuth();
+  const { signOut, user } = useGMCBAuth();
   const { openFeedbackModal } = useGMCBFeedback();
   const navigate = useNavigate();
 
   // ── Session-ended detection (always mounted, fires regardless of active page) ──
   const wasRecordingRef = useRef(false);
+  const [isLive, setIsLive] = useState(false);
   useEffect(() => {
     const check = async () => {
       try {
         const s = await backendApi.sessionStatus();
+        setIsLive(!!s.any_recording);
+
+        // Shift preemption: show toast when scheduler interrupts a manual session
+        if (s.preemption) {
+          toast.warning(
+            `Le shift « ${s.preemption.shift_label} » est programmé maintenant`,
+            {
+              description: "La session manuelle en cours a été interrompue et le shift planifié a pris le relais.",
+              duration: 8000,
+            }
+          );
+        }
+
         if (s.any_recording) {
           wasRecordingRef.current = true;
         } else if (wasRecordingRef.current) {
@@ -76,6 +91,45 @@ export function GMCBSidebar() {
     return () => clearInterval(id);
   }, [navigate]);
 
+  // ── Feedback notification badge ──
+  const [feedbackBadge, setFeedbackBadge] = useState(0);
+
+  useEffect(() => {
+    if (!user) return;
+
+    async function pollNotifs() {
+      try {
+        if (user!.role === "super_admin") {
+          // Badge = count of feedbacks without a response (pending)
+          const res = await backendApi.listFeedbacks();
+          const pending = (res.feedbacks ?? []).filter((f: any) => !f.admin_response).length;
+          setFeedbackBadge(pending);
+        } else {
+          // Badge = count of responded feedbacks whose ID is NOT in the seen-IDs set
+          const seenKey = `gmcb_seen_fb_ids_${user!.email}`;
+          const seenIds: number[] = JSON.parse(localStorage.getItem(seenKey) ?? "[]");
+          const res = await backendApi.listMyFeedbacks();
+          const unread = (res.feedbacks ?? []).filter(
+            (f: any) => f.admin_response && !seenIds.includes(f.id)
+          ).length;
+          setFeedbackBadge(unread);
+        }
+      } catch { /* silent */ }
+    }
+
+    pollNotifs();
+    const id = setInterval(pollNotifs, 60_000);
+    return () => clearInterval(id);
+  }, [user]);
+
+  // Instantly clear badge when user navigates to the feedbacks page
+  useEffect(() => {
+    if (!user) return;
+    if (user.role !== "super_admin" && currentPath === "/clients/gmcb/feedbacks") {
+      setFeedbackBadge(0);
+    }
+  }, [user, currentPath]);
+
   const renderItems = (items: typeof mainItems) =>
     items.map((item) => (
       <SidebarMenuItem key={item.title}>
@@ -89,7 +143,16 @@ export function GMCBSidebar() {
             }`}
           >
             <item.icon className="w-4 h-4" />
-            {open && <span className="text-sm">{item.title}</span>}
+            {open && <span className="text-sm flex-1">{item.title}</span>}
+            {open && item.url === "/clients/gmcb/qualite" && isLive && (
+              <span className="flex items-center gap-1">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500" />
+                </span>
+                <span className="text-[10px] font-bold text-red-500 tracking-wide">LIVE</span>
+              </span>
+            )}
           </Link>
         </SidebarMenuButton>
       </SidebarMenuItem>
@@ -170,14 +233,55 @@ export function GMCBSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton asChild>
               <button
-                onClick={() => openFeedbackModal({ scope: "global" })}
-                className="flex items-center gap-3 px-3 py-2 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors w-full"
+                onClick={() => {
+                  if (user?.role === "super_admin") {
+                    navigate("/clients/gmcb/admin_superadmin");
+                  } else {
+                    openFeedbackModal({ scope: "global" });
+                  }
+                }}
+                className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors w-full ${
+                  currentPath === "/clients/gmcb/admin_superadmin"
+                    ? "bg-primary text-primary-foreground font-medium"
+                    : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                }`}
               >
-                <MessageSquare className="w-4 h-4" />
+                <span className="relative flex-shrink-0">
+                  <MessageSquare className="w-4 h-4" />
+                  {user?.role === "super_admin" && feedbackBadge > 0 && (
+                    <span className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center px-0.5 leading-none">
+                      {feedbackBadge > 99 ? "99+" : feedbackBadge}
+                    </span>
+                  )}
+                </span>
                 {open && <span className="text-sm">Feedback</span>}
               </button>
             </SidebarMenuButton>
           </SidebarMenuItem>
+          {user?.role !== "super_admin" && (
+            <SidebarMenuItem>
+              <SidebarMenuButton asChild>
+                <Link
+                  to="/clients/gmcb/feedbacks"
+                  className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
+                    currentPath === "/clients/gmcb/feedbacks"
+                      ? "bg-primary text-primary-foreground font-medium"
+                      : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
+                >
+                  <span className="relative flex-shrink-0">
+                    <Inbox className="w-4 h-4" />
+                    {feedbackBadge > 0 && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-[14px] h-[14px] rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center px-0.5 leading-none">
+                        {feedbackBadge > 99 ? "99+" : feedbackBadge}
+                      </span>
+                    )}
+                  </span>
+                  {open && <span className="text-sm">Mes feedbacks</span>}
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          )}
           <SidebarMenuItem>
             <SidebarMenuButton asChild>
               <button

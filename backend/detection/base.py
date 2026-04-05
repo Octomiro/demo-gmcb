@@ -354,7 +354,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
     # STATS RECORDING
     # ─────────────────────────────────────────
 
-    def set_stats_recording(self, active, group_id="", shift_id=""):
+    def set_stats_recording(self, active, group_id="", shift_id="", end_reason=None):
         active = bool(active)
         if active == self._stats_active:
             return {"stats_active": self._stats_active, "session_id": self._db_session_id}
@@ -391,7 +391,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             return {"stats_active": True, "session_id": new_sid}
 
         if self._db_writer and self._db_session_id:
-            self._db_writer.close_session(self._db_session_id, totals=self._db_totals())
+            self._db_writer.close_session(self._db_session_id, totals=self._db_totals(), end_reason=end_reason)
             self._db_writer.set_active(False)
         self._db_session_id = None
         self._stats_active = False
