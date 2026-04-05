@@ -706,9 +706,6 @@ const GMCBQualite = () => {
                   img.onerror = null;
                 }}
               />
-              <div style={{ position: "absolute", top: 8, right: 8 }}>
-                <span style={{ background: a.score >= 90 ? "#ef4444" : "#f97316", color: "#fff", borderRadius: 20, padding: "2px 8px", fontSize: 11, fontWeight: 700 }}>{a.score}%</span>
-              </div>
               <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(transparent,rgba(0,0,0,0.78))", padding: "20px 10px 10px" }}>
                 <div style={{ color: "#fff", fontWeight: 600, fontSize: 12 }}>{a.type}</div>
                 <div style={{ color: "rgba(255,255,255,0.65)", fontSize: 10 }}>{a.time} • {a.lot}</div>

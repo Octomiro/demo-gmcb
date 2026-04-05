@@ -644,6 +644,40 @@ def api_cameras():
     return jsonify({"cameras": CAMERAS})
 
 
+@app.route('/api/cameras/detect')
+def api_cameras_detect():
+    """Probe /dev/video* devices and report which ones OpenCV can open."""
+    import glob
+    devices = sorted(glob.glob("/dev/video*"))
+    results = []
+    for dev in devices:
+        # Extract the numeric index (e.g. /dev/video2 → 2)
+        try:
+            idx = int(dev.replace("/dev/video", ""))
+        except ValueError:
+            continue
+        cap = cv2.VideoCapture(idx)
+        opened = cap.isOpened()
+        width = height = fps = None
+        if opened:
+            width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps    = cap.get(cv2.CAP_PROP_FPS)
+            cap.release()
+        results.append({
+            "device": dev,
+            "index": idx,
+            "available": opened,
+            "width": width,
+            "height": height,
+            "fps": round(fps, 1) if fps is not None else None,
+        })
+    # Also report which pipeline is currently using which source
+    pipeline_sources = {pid: cfg["camera_source"] for pid, cfg in
+                        [(p["id"], p) for p in __import__("tracking_config").PIPELINES]}
+    return jsonify({"detected": results, "pipeline_sources": pipeline_sources})
+
+
 @app.route('/api/switch', methods=['POST'])
 def api_switch():
     state = _view_state()
@@ -751,7 +785,7 @@ def api_pipeline_stats(pipeline_id):
     s["nok_no_barcode"] = getattr(st, '_nok_no_barcode', 0)
     s["nok_no_date"] = getattr(st, '_nok_no_date', 0)
     s["nok_anomaly"] = getattr(st, '_nok_anomaly', 0)
-    s["fifo_queue"] = list(st.output_fifo) if hasattr(st, 'output_fifo') else []
+    s["fifo_queue"] = list(st.output_fifo)[-20:] if hasattr(st, 'output_fifo') else []
     s["perf"] = perf
     # Real DB connectivity check (lightweight SELECT 1)
     if db_writer is not None:

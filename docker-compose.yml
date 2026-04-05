@@ -21,6 +21,11 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
 
   # ════════════════════════════════════════
   # Backend  (Flask + YOLO + EfficientAD)
@@ -29,6 +34,7 @@ services:
     build: ./backend
     container_name: gmcb_backend
     restart: unless-stopped
+    runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - DB_HOST=db
@@ -43,23 +49,26 @@ services:
         condition: service_healthy
     ports:
       - "5000:5000"
-
     devices:
-      - /dev/video2:/dev/video2
-      - /dev/video3:/dev/video3
+      - /dev/video0:/dev/video0   # Camera 1 capture node → barcode/date pipeline
+      - /dev/video2:/dev/video2   # Camera 2 capture node → anomaly pipeline
     group_add:
-      - video                       
-
+      - video
+    volumes:
+      - ./data/liveImages:/app/liveImages
+      - ./data/videos:/app/videos
     deploy:
       resources:
         reservations:
+          cpus: '16'
+          memory: 16G
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-    volumes:
-      - ./data/liveImages:/app/liveImages     # proof images (persist across restarts)
+        limits:
+          cpus: '28'
+          memory: 22G
 
   # ════════════════════════════════════════
   # Frontend 
@@ -71,7 +80,12 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      - "8080:80"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
 
 volumes:
   pgdata:

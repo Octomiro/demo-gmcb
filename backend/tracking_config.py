@@ -55,8 +55,8 @@ DEFAULT_CHECKPOINT_ID = "barcode_date"
 # CAMERAS  (add your camera sources here)
 # ==========================
 CAMERAS = [
-    {"id": "cam0", "label": "Camera 0",  "source": 0},
-    {"id": "cam2", "label": "Camera 2",  "source": 2},
+    {"id": "cam0", "label": "Camera 0 (Barcode/Date)",  "source": 0},
+    {"id": "cam2", "label": "Camera 2 (Anomaly)",       "source": 2},
 ]
 
 DEFAULT_CAMERA_ID = "cam0"
@@ -64,14 +64,9 @@ DEFAULT_CAMERA_ID = "cam0"
 # ==========================
 # PIPELINES  (each pipeline = one camera + one checkpoint running in parallel)
 # ==========================
-# ── VIDEO FILE SOURCES (simulating live cameras for demo) ──
-# Change back to 0 / 2 for real USB cameras
-_VIDEO_BARCODE = "/home/adam/Desktop/demo_detection_realtime/V1_comp.mp4"
-_VIDEO_ANOMALY = "/home/adam/Desktop/demo_detection_realtime/testAnomalie-Trim3.mp4"
-
 PIPELINES = [
-    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": _VIDEO_BARCODE, "checkpoint_id": "barcode_date"},
-    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",      "camera_source": _VIDEO_ANOMALY, "checkpoint_id": "anomaly"},
+    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": 0, "checkpoint_id": "barcode_date"},
+    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": 2, "checkpoint_id": "anomaly"},
 ]
 
 DEFAULT_VIEW_PIPELINE = "pipeline_barcode_date"

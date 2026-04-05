@@ -82,12 +82,15 @@ export function useLiveStats(): LiveStats {
     };
   }, [poll]);
 
-  const totalPackets = (p0?.total_packets ?? 0) + (p1?.total_packets ?? 0);
-  const conformes = (p0?.packages_ok ?? 0) + (p1?.packages_ok ?? 0);
-  const nokBarcode = (p0?.nok_no_barcode ?? 0) + (p1?.nok_no_barcode ?? 0);
-  const nokDate = (p0?.nok_no_date ?? 0) + (p1?.nok_no_date ?? 0);
-  const nokAnomaly = (p0?.nok_anomaly ?? 0) + (p1?.nok_anomaly ?? 0);
+  // Barcode/date pipeline (p0) is the sole source of truth for packet count.
+  // It is the last checkpoint on the line — every packet crosses it.
+  // Anomaly pipeline (p1) only contributes its NOK anomaly count.
+  const totalPackets = p0?.total_packets ?? 0;
+  const nokBarcode = p0?.nok_no_barcode ?? 0;
+  const nokDate = p0?.nok_no_date ?? 0;
+  const nokAnomaly = p1?.nok_anomaly ?? 0;
   const totalNok = nokBarcode + nokDate + nokAnomaly;
+  const conformes = totalPackets - totalNok;
   const conformityPct =
     totalPackets > 0
       ? Math.round((conformes / totalPackets) * 100 * 100) / 100

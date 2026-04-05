@@ -445,7 +445,7 @@ class AnomalyMixin:
                 "total_packets": self.total_packets,
                 "packages_ok": ok,
                 "packages_nok": nok,
-                "fifo_queue": list(self.output_fifo),
+                "fifo_queue": list(self.output_fifo)[-20:],
             })
         with self._perf_lock:
             self._perf["detector_loop_ms"] = round(det_ms, 2)
