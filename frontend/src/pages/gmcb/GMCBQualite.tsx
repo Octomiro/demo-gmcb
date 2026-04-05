@@ -99,6 +99,15 @@ const GMCBQualite = () => {
     }
   }, [stats.isRunning, stats.dbConnected]);
 
+  // Sync exit-line params from backend whenever pipeline selection changes
+  useEffect(() => {
+    backendApi.getPipelineStats(selectedPipeline).then((s: any) => {
+      if (s.exit_line_pct != null) setElPct(s.exit_line_pct);
+      if (s.exit_line_vertical != null) setElVertical(s.exit_line_vertical);
+      if (s.exit_line_inverted != null) setElInverted(s.exit_line_inverted);
+    }).catch(() => {});
+  }, [selectedPipeline]);
+
   // Fetch hourly conformity stats
   useEffect(() => {
     let cancelled = false;

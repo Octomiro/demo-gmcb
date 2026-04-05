@@ -605,6 +605,9 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             cp = self.current_checkpoint or {}
             if "exit_line_pct" in cp:
                 self._exit_line_pct = cp["exit_line_pct"]
+            elif "zone_end_pct" in cp:
+                # Anomaly mode: use the ENTRY line position for the slider
+                self._exit_line_pct = round(cp["zone_end_pct"] * 100)
             else:
                 self._exit_line_pct = round((1.0 - CONFIG["exit_line_ratio"]) * 100)
             if "exit_line_vertical" in cp:

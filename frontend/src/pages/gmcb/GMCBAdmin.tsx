@@ -1209,6 +1209,7 @@ const GMCBAdmin = () => {
           daySummary={historyDay}
           defectLabel={(t) => t === "nobarcode" ? "Absence CB" : t === "nodate" ? "Date non visible" : "Anomalie"}
           dayModalOrigin="admin"
+          canDelete={true}
           onClose={() => setHistoryDay(null)}
           onBackToCalendar={() => setHistoryDay(null)}
           onSessionClick={() => { setHistoryDay(null); navigate("/clients/gmcb/historique"); }}

@@ -252,6 +252,9 @@ export const statsApi = {
   getHourlyStats(sessionId: string) {
     return request("GET", `/stats/session/${sessionId}/hourly`);
   },
+  deleteSession(sessionId: string) {
+    return request("DELETE", `/stats/session/${sessionId}`);
+  },
 };
 
 // ─── Pipeline stats ───────────────────────────────────────────────────────────
@@ -385,6 +388,9 @@ export const backendApi = {
 
   // Single session
   getSession: (id: string) => statsApi.getSession(id),
+
+  // Delete a stats session
+  deleteSession: (id: string) => statsApi.deleteSession(id),
 
   // Proof image URL (not a fetch — just a URL string)
   proofImageUrl: (sessionId: string, defectType: string, packetNum: number) =>
