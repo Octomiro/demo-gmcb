@@ -12,7 +12,7 @@ services:
       POSTGRES_USER:     ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./database/db_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
@@ -44,11 +44,10 @@ services:
       - DB_PASSWORD=${DB_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - LIVE_IMAGES_ROOT=/app/liveImages
+      - SCREENSHOTS_DIR=/app/feedback_screenshots
     depends_on:
       db:
         condition: service_healthy
-    ports:
-      - "5000:5000"
     devices:
       - /dev/video0:/dev/video0   # Camera 1 capture node → barcode/date pipeline
       - /dev/video2:/dev/video2   # Camera 2 capture node → anomaly pipeline
@@ -57,6 +56,7 @@ services:
     volumes:
       - ./data/liveImages:/app/liveImages
       - ./data/videos:/app/videos
+      - ./data/feedback_screenshots:/app/feedback_screenshots
     deploy:
       resources:
         reservations:

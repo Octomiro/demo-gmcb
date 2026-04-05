@@ -5,6 +5,7 @@ Extracted from web_server_backend_v2.py.  No logic changes — pure move.
 
 import json
 import time
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,6 +31,10 @@ scheduler = BackgroundScheduler(
     daemon=True,
     timezone="Africa/Tunis",
 )
+
+# ── Preemption event — consumed by frontend via /api/session/status ──
+_preemption_lock = threading.Lock()
+_preemption_event = None  # dict or None: {"shift_label": ..., "timestamp": ..., "old_group_id": ...}
 
 
 def _check_shift_variants(shift_id, today_str):
@@ -96,7 +101,14 @@ def _shift_prewarm(shift_id):
 
 
 def _shift_start(shift_id):
-    """Called when a shift's start_time fires. Starts ALL pipelines."""
+    """Called when a shift's start_time fires. Starts ALL pipelines.
+    
+    Priority rules:
+    - If a manual session is active → preempt it (stop, mark interrupted, start shift)
+    - If another shift is already active → skip (two shifts should never overlap)
+    - If guard is stale (no pipelines running) → clear and proceed
+    """
+    global _preemption_event
     import uuid
 
     if db_writer is None:
@@ -108,18 +120,61 @@ def _shift_start(shift_id):
     label = shift.get("label", shift_id)
 
     with _session_lock:
-        if pipeline_manager._active_session_source is not None:
+        current_source = pipeline_manager._active_session_source
+
+        if current_source == "shift":
+            # Another scheduled shift is already running — never overlap
+            print(f"[SCHEDULER] Shift '{label}' skipped — another shift is already active "
+                  f"(group={(pipeline_manager._active_session_group or '')[:8]})")
+            return
+
+        if current_source == "manual":
+            # Manual (instant) session is running — preempt it
+            any_live = any(
+                st.is_running or getattr(st, '_stats_active', False)
+                for _, st in _all_states()
+            )
+            if any_live:
+                old_group = pipeline_manager._active_session_group
+                print(f"[SCHEDULER] Shift '{label}' preempting manual session "
+                      f"(group={( old_group or '')[:8]})")
+
+                # Stop all pipelines + stats from the manual session
+                for pid, st in _all_states():
+                    if getattr(st, '_stats_active', False):
+                        st.set_stats_recording(False, end_reason="preempted")
+                    if st.is_running:
+                        st.stop_processing()
+
+                # Small pause so DB writes flush before re-starting
+                time.sleep(0.3)
+
+                # Publish preemption event for frontend
+                with _preemption_lock:
+                    _preemption_event = {
+                        "shift_label": label,
+                        "timestamp": datetime.now(_TUNIS_TZ).isoformat(),
+                        "old_group_id": old_group,
+                    }
+
+                print(f"[SCHEDULER] Manual session stopped & marked as interrupted")
+            # Clear guard in both cases
+            pipeline_manager._active_session_source = None
+            pipeline_manager._active_session_group = None
+            pipeline_manager._active_session_shift_id = None
+
+        elif current_source is not None:
+            # Unknown source but no pipelines running → stale guard
             any_live = any(
                 st.is_running or getattr(st, '_stats_active', False)
                 for _, st in _all_states()
             )
             if any_live:
                 print(f"[SCHEDULER] Shift '{label}' skipped — pipelines already active "
-                      f"(source={pipeline_manager._active_session_source}, "
-                      f"group={(pipeline_manager._active_session_group or '')[:8]})")
+                      f"(source={current_source})")
                 return
             print(f"[SCHEDULER] Shift '{label}' — clearing stale guard "
-                  f"(source={pipeline_manager._active_session_source}, no pipelines running)")
+                  f"(source={current_source}, no pipelines running)")
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None

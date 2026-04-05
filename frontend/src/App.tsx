@@ -18,6 +18,8 @@ import GMCBQualite from "./pages/gmcb/GMCBQualite";
 import GMCBHistorique from "./pages/gmcb/GMCBHistorique";
 import GMCBAdmin from "./pages/gmcb/GMCBAdmin";
 import GMCBSettings from "./pages/gmcb/GMCBSettings";
+import GMCBSuperAdmin from "./pages/gmcb/GMCBSuperAdmin";
+import GMCBMyFeedbacks from "./pages/gmcb/GMCBMyFeedbacks";
 
 // ── 404 ───────────────────────────────────────────────────────────────────────
 import NotFound from "./pages/NotFound";
@@ -43,6 +45,8 @@ const App = () => (
               <Route path="/clients/gmcb/historique" element={<GMCBHistorique />} />
               <Route path="/clients/gmcb/admin" element={<GMCBAdmin />} />
               <Route path="/clients/gmcb/settings" element={<GMCBSettings />} />
+              <Route path="/clients/gmcb/admin_superadmin" element={<GMCBSuperAdmin />} />
+              <Route path="/clients/gmcb/feedbacks" element={<GMCBMyFeedbacks />} />
             </Route>
 
             {/* ─── 404 ───────────────────────────────────────────── */}

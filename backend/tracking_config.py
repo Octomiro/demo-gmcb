@@ -44,7 +44,7 @@ CHECKPOINTS = [
         #   zone_end_pct   = ENTRY line (right side, where scanning begins)
         #   zone_start_pct = EXIT  line (left side, decision is locked & queued)
         "zone_start_pct": 0.20,
-        "zone_end_pct":   0.60,
+        "zone_end_pct":   0.80,
     },
 ]
 
@@ -122,7 +122,7 @@ SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
 
 # ==========================
-DETECTOR_FRAME_SKIP = 1
+DETECTOR_FRAME_SKIP = 2
 
 #(segmentation + EfficientAD),
 ANOMALY_FRAME_SKIP = 3

@@ -63,5 +63,18 @@ CREATE TABLE IF NOT EXISTS auth_users (
     role        TEXT NOT NULL DEFAULT 'client',
     created_at  TEXT NOT NULL DEFAULT ''
 );
+-- ── Feedback  ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS feedbacks (
+    id          SERIAL PRIMARY KEY,
+    title       TEXT NOT NULL,
+    comment     TEXT NOT NULL DEFAULT '',
+    type        TEXT NOT NULL DEFAULT 'bug',
+    scope       TEXT NOT NULL DEFAULT 'global',
+    urgency     TEXT NOT NULL DEFAULT 'medium',
+    session_id  TEXT,
+    user_email  TEXT,
+    created_at  TEXT NOT NULL DEFAULT ''
+);
 
+CREATE INDEX IF NOT EXISTS idx_feedbacks_created ON feedbacks (created_at DESC);
 

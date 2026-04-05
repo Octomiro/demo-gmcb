@@ -134,12 +134,14 @@ class DBWriter:
                 self._release_pg_conn(conn)
         return sid
 
-    def close_session(self, session_id, totals=None):
+    def close_session(self, session_id, totals=None, end_reason=None):
         if not self._available or not session_id:
             return
         totals = totals or {}
+        ts = _ts()
+        ended_at = f"{end_reason}:{ts}" if end_reason else ts
         params = (
-            _ts(),
+            ended_at,
             totals.get("total", 0),
             totals.get("ok_count", 0),
             totals.get("nok_no_barcode", 0),
@@ -299,6 +301,89 @@ class DBWriter:
                 return [dict(r) for r in cur.fetchall()]
         except Exception as e:
             print(f"[DBWriter] list_crossings_for_group error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
+    def get_hourly_stats(self, session_id):
+        """Return per-hour conformity stats for a session."""
+        if not self._available or not session_id:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Get session info
+                cur.execute(
+                    "SELECT started_at, ended_at, total, ok_count FROM sessions WHERE id = %s",
+                    (session_id,),
+                )
+                sess = cur.fetchone()
+                if not sess:
+                    return []
+
+                # Count defects grouped by hour
+                cur.execute(
+                    "SELECT EXTRACT(HOUR FROM crossed_at)::int AS hour, "
+                    "COUNT(*) AS defect_count, "
+                    "SUM(CASE WHEN defect_type = 'anomaly' THEN 1 ELSE 0 END)::int AS anomaly_count "
+                    "FROM defective_packets WHERE session_id = %s "
+                    "GROUP BY hour ORDER BY hour",
+                    (session_id,),
+                )
+                defect_rows = {int(r["hour"]): dict(r) for r in cur.fetchall()}
+
+                # Count ALL crossings (ok + nok) per hour from a crossing log
+                # Since we only log defective packets, we derive from session totals
+                # Use session start/end to figure out which hours are active
+                cur.execute(
+                    "SELECT EXTRACT(HOUR FROM crossed_at)::int AS hour, COUNT(*) AS cnt "
+                    "FROM defective_packets WHERE session_id = %s GROUP BY hour ORDER BY hour",
+                    (session_id,),
+                )
+
+                started = sess.get("started_at")
+                ended = sess.get("ended_at")
+                total = sess.get("total", 0) or 0
+                ok_count = sess.get("ok_count", 0) or 0
+
+                # Build hourly buckets from defect data
+                result = []
+                for hour_val, info in defect_rows.items():
+                    defect_count = info.get("defect_count", 0)
+                    anomaly_count = info.get("anomaly_count", 0)
+                    # We can't know exact total per hour without a full crossing log,
+                    # so report defect stats per hour
+                    result.append({
+                        "hour": hour_val,
+                        "defect_count": defect_count,
+                        "anomaly_count": anomaly_count,
+                        "conformity_pct": 0.0,
+                        "cadence": 0,
+                    })
+
+                # If we have session-level totals, distribute proportionally
+                # or compute conformity from the overall session rate
+                if total > 0:
+                    overall_conformity = (ok_count / total) * 100
+                    total_defects = sum(r["defect_count"] for r in result)
+                    for r in result:
+                        if total_defects > 0:
+                            weight = r["defect_count"] / total_defects
+                            estimated_total_for_hour = int(total * weight) if total_defects > 0 else 0
+                            ok_for_hour = max(0, estimated_total_for_hour - r["defect_count"])
+                            r["conformity_pct"] = round(
+                                (ok_for_hour / estimated_total_for_hour * 100) if estimated_total_for_hour > 0 else 100.0, 2
+                            )
+                            # cadence: packets per minute (rough estimate)
+                            r["cadence"] = round(estimated_total_for_hour / 60, 1)
+                        else:
+                            r["conformity_pct"] = 100.0
+
+                return result
+        except Exception as e:
+            print(f"[DBWriter] get_hourly_stats error: {e}")
             return []
         finally:
             self._release_pg_conn(conn)
@@ -833,6 +918,49 @@ class DBWriter:
         finally:
             self._release_pg_conn(conn)
 
+    def delete_stats_session(self, session_id):
+        """Hard-delete a stats session group and all its associated data.
+
+        session_id may be either an individual session id or a group_id —
+        both cases are covered so that the grouped view works correctly.
+
+        Returns the list of individual session UUIDs that were deleted,
+        so the caller can clean up proof image folders.
+        """
+        if not self._available or not session_id:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor() as cur:
+                # Collect all individual session IDs in this group
+                cur.execute(
+                    "SELECT id FROM sessions WHERE id = %s OR group_id = %s",
+                    (session_id, session_id),
+                )
+                ids = [row[0] for row in cur.fetchall()]
+                if not ids:
+                    return []
+                # Delete defective_packets first (FK constraint)
+                cur.execute(
+                    "DELETE FROM defective_packets WHERE session_id IN "
+                    "(SELECT id FROM sessions WHERE id = %s OR group_id = %s)",
+                    (session_id, session_id),
+                )
+                # Delete all session rows belonging to this group
+                cur.execute(
+                    "DELETE FROM sessions WHERE id = %s OR group_id = %s",
+                    (session_id, session_id),
+                )
+            conn.commit()
+            return ids
+        except Exception as e:
+            print(f"[DBWriter] delete_stats_session error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
     def delete_one_off_session(self, session_id):
         """Delete a one-off session from the unified shifts table."""
         if not self._available or not session_id:
@@ -928,5 +1056,139 @@ class DBWriter:
         except Exception as e:
             print(f"[DBWriter] delete_auth_user error: {e}")
             return False
+        finally:
+            self._release_pg_conn(conn)
+
+    # ── Feedback ──────────────────────────────────────────────────────────────
+
+    def create_feedback(self, title, comment, fb_type, scope, urgency, session_id, user_email, screenshot_path=None):
+        if not self._available:
+            return None
+        conn = self._get_pg_conn()
+        if not conn:
+            return None
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "INSERT INTO feedbacks (title, comment, type, scope, urgency, session_id, user_email, screenshot_path, created_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                    (title, comment, fb_type, scope, urgency, session_id or None, user_email or None, screenshot_path or None, _ts()),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+        except Exception as e:
+            print(f"[DBWriter] create_feedback error: {e}")
+            return None
+        finally:
+            self._release_pg_conn(conn)
+
+    def update_feedback_screenshot(self, feedback_id, screenshot_path):
+        if not self._available:
+            return False
+        conn = self._get_pg_conn()
+        if not conn:
+            return False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE feedbacks SET screenshot_path = %s WHERE id = %s", (screenshot_path, feedback_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"[DBWriter] update_feedback_screenshot error: {e}")
+            return False
+        finally:
+            self._release_pg_conn(conn)
+
+    def set_feedback_response(self, feedback_id, response_text):
+        if not self._available:
+            return False
+        conn = self._get_pg_conn()
+        if not conn:
+            return False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE feedbacks SET admin_response = %s, responded_at = %s WHERE id = %s",
+                    (response_text, _ts(), feedback_id),
+                )
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"[DBWriter] set_feedback_response error: {e}")
+            return False
+        finally:
+            self._release_pg_conn(conn)
+
+    def list_feedbacks(self, limit=200):
+        if not self._available:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM feedbacks ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+                return [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[DBWriter] list_feedbacks error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
+    def list_feedbacks_for_user(self, user_email, limit=100):
+        if not self._available or not user_email:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT * FROM feedbacks WHERE user_email = %s ORDER BY created_at DESC LIMIT %s",
+                    (user_email, limit),
+                )
+                return [dict(r) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"[DBWriter] list_feedbacks_for_user error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
+    def cleanup_old_screenshots(self, screenshots_dir, max_age_days=15):
+        """Delete screenshot files and DB records older than max_age_days."""
+        if not self._available:
+            return
+        import os as _os
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = (_dt.utcnow() - _td(days=max_age_days)).isoformat()
+        conn = self._get_pg_conn()
+        if not conn:
+            return
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, screenshot_path FROM feedbacks WHERE screenshot_path IS NOT NULL AND created_at < %s",
+                    (cutoff,),
+                )
+                stale = cur.fetchall()
+            for row in stale:
+                path = row["screenshot_path"]
+                if path:
+                    full = _os.path.join(screenshots_dir, _os.path.basename(path))
+                    try:
+                        _os.remove(full)
+                    except FileNotFoundError:
+                        pass
+                with conn.cursor() as cur2:
+                    cur2.execute("UPDATE feedbacks SET screenshot_path = NULL WHERE id = %s", (row["id"],))
+            conn.commit()
+            if stale:
+                print(f"[DBWriter] Cleaned up {len(stale)} old screenshot(s)")
+        except Exception as e:
+            print(f"[DBWriter] cleanup_old_screenshots error: {e}")
         finally:
             self._release_pg_conn(conn)
