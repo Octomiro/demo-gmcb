@@ -66,6 +66,11 @@ class TrackerMixin:
                             secondary_date_dets.append([int(sx1), int(sy1), int(sx2), int(sy2), conf_val])
             except Exception as sec_err:
                 print(f"[DETECTOR] Secondary date model error: {sec_err}")
+            finally:
+                try:
+                    del sec_results
+                except NameError:
+                    pass
 
         # Merge and deduplicate date detections
         _merged = date_dets + secondary_date_dets

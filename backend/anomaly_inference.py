@@ -155,4 +155,5 @@ def predict(image, teacher, student, autoencoder, teacher_mean, teacher_std,
         map_ae = 0.1 * (map_ae - q_ae_start) / ((q_ae_end - q_ae_start) or 1e-6)
 
     map_combined = 0.5 * map_st + 0.5 * map_ae
+    del teacher_output, student_output, autoencoder_output
     return map_combined, map_st, map_ae

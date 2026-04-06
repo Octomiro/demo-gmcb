@@ -442,6 +442,12 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             except Exception:
                 pass
             self.cap = None
+        self._ad_track_states.clear()
+        with self._raw_history_lock:
+            self._raw_history.clear()
+        if hasattr(self, '_det_frame') and self._det_frame is not None:
+            del self._det_frame
+            self._det_frame = None
         try:
             import torch
             if torch.cuda.is_available():
@@ -664,6 +670,13 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
                     continue
 
                 last_processed_idx = frame_idx
+                if frame_idx % 30 == 0:
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
                 t_start = time.time()
                 lag_frames = max(0, self.frame_count - frame_idx)
                 with self._perf_lock:
@@ -704,6 +717,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
                     self._process_anomaly_frame(frame, frame_idx, results, t_start)
                 else:
                     self._process_tracking_frame(frame, frame_idx, results, t_start)
+                del results
 
             print("[DETECTOR] Stopped")
 

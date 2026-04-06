@@ -124,6 +124,7 @@ class AnomalyMixin:
         map_combined = torch.nn.functional.interpolate(
             map_combined, (orig_h, orig_w), mode='bilinear')
         score = map_combined[0, 0].cpu().numpy().max()
+        del img_tensor, map_combined
 
         thresh = (self.current_checkpoint or {}).get("ad_thresh", 5000.0)
         return score > thresh, float(score)
@@ -170,6 +171,11 @@ class AnomalyMixin:
             m = torch.nn.functional.interpolate(m, (orig_h, orig_w), mode='bilinear')
             score = m[0, 0].cpu().numpy().max()
             results.append((score > thresh, float(score)))
+
+        del batch, map_combined, m
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return results
 
@@ -370,6 +376,8 @@ class AnomalyMixin:
 
                     tstate['crops'] = []
                     tstate['scores'] = []
+                    # Schedule dead track for removal after overlay is built
+                    # (do not del here as tstate is still referenced below)
 
                     if self._stats_active:
                         if (
@@ -412,6 +420,15 @@ class AnomalyMixin:
                         color = (0, 255, 0)
 
                 track_boxes.append((x1, y1, x2, y2, label, color))
+
+        # Prune decided tracks that are no longer active to free memory
+        active_tids = set(track_ids) if (has_masks and has_ids) else set()
+        dead_tids = [
+            tid for tid, st in self._ad_track_states.items()
+            if st['decision'] is not None and tid not in active_tids
+        ]
+        for tid in dead_tids:
+            del self._ad_track_states[tid]
 
         det_ms = (time.time() - t_start) * 1000
         det_fps = 1000 / det_ms if det_ms > 0 else 0
