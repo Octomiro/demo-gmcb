@@ -224,13 +224,13 @@ class AnomalyMixin:
     def _save_nok_packet_bg(self, pkt_num, tstate, checkpoint):
         """Fire-and-forget: save NOK image via bounded thread pool.
         Drops task if queue is backing up to prevent RAM exhaustion."""
-        from detection.base import _proof_executor
+        from detection.base import _proof_executor, _PROOF_QUEUE_MAX_DEPTH
         # Guard: drop if too many tasks are already queued (disk too slow)
         try:
             queue_depth = _proof_executor._work_queue.qsize()
         except Exception:
             queue_depth = 0
-        if queue_depth > 50:
+        if queue_depth > _PROOF_QUEUE_MAX_DEPTH:
             print(f"[AD] Proof queue full ({queue_depth}), dropping NOK image for packet #{pkt_num}")
             return
         data = {

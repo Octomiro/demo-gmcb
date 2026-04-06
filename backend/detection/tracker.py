@@ -4,6 +4,8 @@ from db_writer import SNAPSHOT_EVERY_N_PACKETS
 from helpers import calculate_bbox_metrics
 from tracking_config import CONFIG
 
+_STALE_TRACK_FRAME_THRESHOLD = 150  # prune decided tracks not seen for this many frames
+
 
 class TrackerMixin:
     """Methods mixed into TrackingState for mode='tracking'."""
@@ -293,7 +295,7 @@ class TrackerMixin:
 
         # ── Prune stale decided tracks every 100 frames to prevent O(n²) growth ──
         if frame_idx % 100 == 0:
-            stale_threshold = frame_idx - 150  # not seen for 150+ frames = gone
+            stale_threshold = frame_idx - _STALE_TRACK_FRAME_THRESHOLD  # not seen for threshold frames = gone
             stale_tids = [
                 tid for tid, pkg in self.packages.items()
                 if pkg.get("decision_locked") and

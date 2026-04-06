@@ -21,6 +21,7 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD", "aa")
 STATS_ENABLED_DEFAULT = False
 SNAPSHOT_EVERY_N_PACKETS = 25
 WRITE_QUEUE_MAXSIZE = 10000
+_DROP_WARNING_INTERVAL_SECONDS = 60.0  # max 1 drop warning per this interval
 
 _TUNIS_TZ = ZoneInfo("Africa/Tunis")
 
@@ -48,7 +49,7 @@ class DBWriter:
         """Increment dropped event counter and emit a rate-limited warning."""
         self._dropped_events += 1
         now = time.monotonic()
-        if now - self._last_drop_warning > 60.0:  # max 1 warning per minute
+        if now - self._last_drop_warning > _DROP_WARNING_INTERVAL_SECONDS:
             self._last_drop_warning = now
             print(f"[DBWriter] WARNING: write_queue full — dropping '{event_type}' event. "
                   f"Total dropped this session: {self._dropped_events}")

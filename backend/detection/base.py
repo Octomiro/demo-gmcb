@@ -39,6 +39,7 @@ TRACKER_YAML_PATH = _write_tracker_yaml()
 # Bounded thread pools shared across all pipelines
 _secondary_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="SecModel")
 _proof_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ProofSave")
+_PROOF_QUEUE_MAX_DEPTH = 50  # drop proof saves if queue exceeds this depth
 
 
 class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
@@ -358,7 +359,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             queue_depth = _proof_executor._work_queue.qsize()
         except Exception:
             queue_depth = 0
-        if queue_depth > 50:
+        if queue_depth > _PROOF_QUEUE_MAX_DEPTH:
             print(f"[PROOF] Queue full ({queue_depth}), dropping proof for packet #{pkt_num}")
             return
         frame_copy = frame.copy()
