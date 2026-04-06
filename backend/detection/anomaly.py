@@ -214,14 +214,25 @@ class AnomalyMixin:
             try:
                 bgr = cv2.cvtColor(crops[worst_idx], cv2.COLOR_RGB2BGR)
                 cv2.imwrite(img_path, bgr, [cv2.IMWRITE_WEBP_QUALITY, 85])
-                print(f"[AD] Saved NOK packet #{pkt_num} -> {img_path}")
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "[AD] Saved NOK packet #%s -> %s", pkt_num, img_path
+                )
             except Exception as e:
                 print(f"[AD] Failed to save {img_path}: {e}")
 
     def _save_nok_packet_bg(self, pkt_num, tstate, checkpoint):
-        """Fire-and-forget: save NOK image+CSV via bounded thread pool."""
+        """Fire-and-forget: save NOK image via bounded thread pool.
+        Drops task if queue is backing up to prevent RAM exhaustion."""
         from detection.base import _proof_executor
-        # Snapshot data; capture session_id now so folder is stable even if session changes
+        # Guard: drop if too many tasks are already queued (disk too slow)
+        try:
+            queue_depth = _proof_executor._work_queue.qsize()
+        except Exception:
+            queue_depth = 0
+        if queue_depth > 50:
+            print(f"[AD] Proof queue full ({queue_depth}), dropping NOK image for packet #{pkt_num}")
+            return
         data = {
             'results': list(tstate.get('results', [])),
             'scores': list(tstate.get('scores', [])),
@@ -369,8 +380,11 @@ class AnomalyMixin:
                         self._nok_anomaly += 1
 
                     if is_def:
-                        print(f"[AD] Packet #{self.total_packets} -> NOK "
-                              f"(scans={len(tstate['results'])})")
+                        import logging as _logging
+                        _logging.getLogger(__name__).debug(
+                            "[AD] Packet #%d -> NOK (scans=%d)",
+                            self.total_packets, len(tstate['results'])
+                        )
                         self._save_nok_packet_bg(
                             self.total_packets, tstate, cp)
 
@@ -396,7 +410,8 @@ class AnomalyMixin:
                                     "nok_anomaly": self._nok_anomaly,
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("session_update")
                         # Record defective packet with timestamp for ejection
                         if is_def:
                             try:
@@ -409,7 +424,8 @@ class AnomalyMixin:
                                     "crossed_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("crossing")
 
                     pkt_num = self.packet_numbers.get(tid)
                     if is_def:
@@ -421,13 +437,21 @@ class AnomalyMixin:
 
                 track_boxes.append((x1, y1, x2, y2, label, color))
 
-        # Prune decided tracks that are no longer active to free memory
+        # Prune tracks that are no longer active:
+        # - decided tracks that have left the frame (normal exit)
+        # - abandoned tracks with no decision that disappeared (occlusion/ID switch)
         active_tids = set(track_ids) if (has_masks and has_ids) else set()
         dead_tids = [
             tid for tid, st in self._ad_track_states.items()
-            if st['decision'] is not None and tid not in active_tids
+            if tid not in active_tids and (
+                st['decision'] is not None or  # decided and gone
+                (st['decision'] is None and len(st.get('crops', [])) > 0)  # abandoned mid-scan
+            )
         ]
         for tid in dead_tids:
+            # Explicitly clear crop arrays before deleting to free numpy memory immediately
+            self._ad_track_states[tid]['crops'] = []
+            self._ad_track_states[tid]['scores'] = []
             del self._ad_track_states[tid]
 
         det_ms = (time.time() - t_start) * 1000

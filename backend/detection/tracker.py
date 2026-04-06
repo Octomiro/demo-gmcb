@@ -28,14 +28,18 @@ class TrackerMixin:
         # ── Submit secondary date model in parallel ──
         sec_future = None
         if self._use_secondary_date and self.secondary_model is not None:
-            sec_conf = self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30))
-            sec_future = _secondary_executor.submit(
-                self.secondary_model,
-                frame,
-                conf=sec_conf,
-                imgsz=CONFIG["imgsz"],
-                verbose=False,
-            )
+            # Skip submission if previous task is still running to prevent queue buildup
+            last = self._last_sec_future
+            if last is None or last.done():
+                sec_conf = self.current_checkpoint.get("conf_date", CONFIG.get("conf_date", 0.30))
+                sec_future = _secondary_executor.submit(
+                    self.secondary_model,
+                    frame,
+                    conf=sec_conf,
+                    imgsz=CONFIG["imgsz"],
+                    verbose=False,
+                )
+                self._last_sec_future = sec_future
 
         if results.boxes is not None:
             box_ids = results.boxes.id
@@ -120,10 +124,12 @@ class TrackerMixin:
                     "frames_tracked": 0,
                     "first_frame": frame_idx,
                     "pre_line_seen": False,
+                    "last_seen_frame": frame_idx,
                 }
 
             pkg = self.packages[tid]
             pkg["frames_tracked"] += 1
+            pkg["last_seen_frame"] = frame_idx
             bbox = (x1, y1, x2, y2)
             ca, _ = calculate_bbox_metrics(x1, y1, x2, y2)
             pkg["prev_bbox"] = bbox
@@ -262,7 +268,8 @@ class TrackerMixin:
                                     "nok_anomaly": self._nok_anomaly,
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("session_update")
 
                         # Record defective packet with timestamp for ejection
                         if final == "NOK":
@@ -281,7 +288,21 @@ class TrackerMixin:
                                     "crossed_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("crossing")
+
+        # ── Prune stale decided tracks every 100 frames to prevent O(n²) growth ──
+        if frame_idx % 100 == 0:
+            stale_threshold = frame_idx - 150  # not seen for 150+ frames = gone
+            stale_tids = [
+                tid for tid, pkg in self.packages.items()
+                if pkg.get("decision_locked") and
+                pkg.get("last_seen_frame", 0) < stale_threshold
+            ]
+            for tid in stale_tids:
+                self.packages.pop(tid, None)
+                self.packet_numbers.pop(tid, None)
+                self.packets_crossed_line.discard(tid)
 
         # ── Detection timing ──
         det_ms = (time.time() - t_start) * 1000

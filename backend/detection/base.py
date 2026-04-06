@@ -86,6 +86,14 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self.cap = None
         self.is_running = False
 
+        # Thread references for safe join on stop
+        self._reader_thread = None
+        self._detector_thread = None
+        self._compositor_thread = None
+
+        # Track last secondary model future to avoid queue buildup
+        self._last_sec_future = None
+
         # ── Raw frame from reader (always latest, always smooth) ──
         self._raw_frame = None
         self._raw_lock = threading.Lock()
@@ -286,6 +294,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self.packet_numbers = {}
         self.packets_crossed_line = set()
         self._ad_track_states = {}
+        self._last_sec_future = None
         self._raw_frame = None
         self._det_frame = None
         self._det_frame_idx = 0
@@ -340,8 +349,17 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             print(f"[PROOF] Failed to save {img_path}: {e}")
 
     def _save_proof_image_bg(self, pkt_num, defect_type, frame, bbox=None):
-        """Fire-and-forget: save proof image via bounded thread pool."""
+        """Fire-and-forget: save proof image via bounded thread pool.
+        Drops task if queue is backing up to prevent RAM exhaustion."""
         if not self._stats_active or not self._db_session_id:
+            return
+        # Guard: drop if too many tasks are already queued (disk too slow)
+        try:
+            queue_depth = _proof_executor._work_queue.qsize()
+        except Exception:
+            queue_depth = 0
+        if queue_depth > 50:
+            print(f"[PROOF] Queue full ({queue_depth}), dropping proof for packet #{pkt_num}")
             return
         frame_copy = frame.copy()
         session_now = self._db_session_id
@@ -426,16 +444,28 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         my_gen = self._session_gen
         self.is_running = True
 
-        # Launch THREE parallel threads
-        threading.Thread(target=self._reader_loop,     args=(my_gen,), daemon=True, name="VideoReader").start()
-        threading.Thread(target=self._detection_loop,  daemon=True, name="YOLODetector").start()
-        threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor").start()
+        # Launch THREE parallel threads and store references for safe join
+        self._reader_thread = threading.Thread(target=self._reader_loop, args=(my_gen,), daemon=True, name="VideoReader")
+        self._detector_thread = threading.Thread(target=self._detection_loop, daemon=True, name="YOLODetector")
+        self._compositor_thread = threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor")
+        self._reader_thread.start()
+        self._detector_thread.start()
+        self._compositor_thread.start()
 
         return {"status": "started", "source": video_source, "mode": "live"}
 
     def stop_processing(self):
         self.is_running = False
-        time.sleep(0.5)
+        # Signal events so blocked threads wake up immediately
+        self._det_event.set()
+        self._raw_changed.set()
+        # Join all threads with timeout to ensure clean stop before next start
+        for t in (self._reader_thread, self._detector_thread, self._compositor_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=5.0)
+        self._reader_thread = None
+        self._detector_thread = None
+        self._compositor_thread = None
         if self.cap:
             try:
                 self.cap.release()

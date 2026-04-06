@@ -39,7 +39,19 @@ class DBWriter:
         self._current_session_id = None
         self._pg_pool = None
 
+        self._dropped_events = 0
+        self._last_drop_warning = 0.0
+
         self._available = self._connect()
+
+    def log_dropped(self, event_type="unknown"):
+        """Increment dropped event counter and emit a rate-limited warning."""
+        self._dropped_events += 1
+        now = time.monotonic()
+        if now - self._last_drop_warning > 60.0:  # max 1 warning per minute
+            self._last_drop_warning = now
+            print(f"[DBWriter] WARNING: write_queue full — dropping '{event_type}' event. "
+                  f"Total dropped this session: {self._dropped_events}")
 
     def _connect(self):
         """Open the connection pool and verify connectivity. Returns True on success."""
@@ -545,6 +557,7 @@ class DBWriter:
             "queue_max": self.write_queue.maxsize,
             "active": self.is_active,
             "session_id": self.current_session_id,
+            "dropped_events": self._dropped_events,
         }
 
     # ═══════════════════════════════════════════════

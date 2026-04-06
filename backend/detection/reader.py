@@ -18,6 +18,7 @@ class ReaderMixin:
 
     def _reader_loop(self, session_gen: int):
         """Read frames at native FPS. NEVER waits for YOLO. Always smooth."""
+        cap = None
         try:
             src = self.video_source
 
@@ -33,32 +34,32 @@ class ReaderMixin:
 
             if isinstance(src, str) and src.startswith("rtsp://"):
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-                self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             else:
                 import platform
                 if isinstance(src, str) and src.isdigit():
                     src = int(src)
                 if platform.system() == "Windows":
-                    self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                    cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
                 else:
-                    self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
-                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-            if not self.cap or not self.cap.isOpened():
+            if not cap or not cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
                 self.is_running = False
                 return
 
-            raw_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
             # Live cameras often report 0; use requested CAMERA_FPS as fallback
             fps = raw_fps if raw_fps and raw_fps > 0 else CAMERA_FPS
-            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             with self._stats_lock:
                 self.stats["video_fps"] = round(fps, 1)
@@ -70,7 +71,7 @@ class ReaderMixin:
             print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | Live camera")
 
             while self.is_running:
-                ret, frame = self.cap.read()
+                ret, frame = cap.read()
                 if not ret:
                     break
 
@@ -106,12 +107,11 @@ class ReaderMixin:
             traceback.print_exc()
         finally:
             time.sleep(0.1)  # Let other threads notice is_running change
-            if self.cap:
+            if cap:
                 try:
-                    self.cap.release()
+                    cap.release()
                 except Exception:
                     pass
-                self.cap = None
             # Only update shared state if this is still the current session;
             # a newer session may have already set is_running = True.
             if self._session_gen == session_gen:
