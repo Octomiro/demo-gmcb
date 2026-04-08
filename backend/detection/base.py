@@ -109,6 +109,9 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self._jpeg_bytes = None
         self._jpeg_bytes_low = None   # half-res, quality-40 for remote viewers
         self._jpeg_lock = threading.Lock()
+        self._jpeg_seq = 0            # incremented each time compositor writes a new frame
+        self._jpeg_event = threading.Event()  # signalled when a new JPEG is ready
+        self._low_clients_count = 0   # number of ?low=1 MJPEG clients (drives lazy low-res encode)
 
         # ── Frame dimensions (set by reader, used by compositor for exit line) ──
         self._frame_width = 0
@@ -154,6 +157,11 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self._nok_no_barcode = 0
         self._nok_no_date = 0
         self._nok_anomaly = 0
+        # Which validation checks are enforced for the current session.
+        # barcode=False → missing barcode still counts as OK
+        # date=False    → missing date still counts as OK (overrides require_date_for_ok)
+        # anomaly=False → anomaly detections do not count as NOK
+        self._enabled_checks = {"barcode": True, "date": True, "anomaly": True}
         # Baselines captured when stats recording starts, so session
         # totals reflect only the recording window.
         self._session_baseline_total = 0
@@ -189,6 +197,10 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             "rotation_deg": 0,
             "fifo_queue": [],
             "is_running": False,
+            "camera_fourcc": "",
+            "camera_width": 0,
+            "camera_height": 0,
+            "reader_fps": 0.0,
         }
 
     @staticmethod
@@ -349,6 +361,18 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             self._save_proof_image,
             pkt_num, defect_type, frame_copy, bbox, session_now,
         )
+
+    # ─────────────────────────────────────────
+    # VALIDATION CHECK CONTROL
+    # ─────────────────────────────────────────
+
+    def set_enabled_checks(self, checks: dict):
+        """Set which validation checks are enforced. Safe to call before start_processing."""
+        self._enabled_checks = {
+            "barcode": bool(checks.get("barcode", True)),
+            "date":    bool(checks.get("date",    True)),
+            "anomaly": bool(checks.get("anomaly", True)),
+        }
 
     # ─────────────────────────────────────────
     # STATS RECORDING

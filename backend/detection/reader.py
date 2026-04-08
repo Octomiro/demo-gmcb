@@ -43,11 +43,14 @@ class ReaderMixin:
                     self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
                 else:
                     self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                # Order matters for V4L2: FOURCC → WIDTH → HEIGHT → FPS (last).
+                # Setting WIDTH/HEIGHT fires VIDIOC_S_FMT which resets FPS;
+                # VIDIOC_S_PARM (FPS) must be issued after the format is final.
                 self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)   # LAST: after format
+                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # 2 = USB double-buffer; 1 starves DMA → 15fps
 
             if not self.cap or not self.cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
@@ -60,14 +63,34 @@ class ReaderMixin:
             w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+            # Read back the actual negotiated fourcc so we can confirm MJPG was accepted
+            fourcc_int = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            fourcc_str = "".join(chr((fourcc_int >> (8 * i)) & 0xFF) for i in range(4))
+            usb_bw_mbps = w * h * fps * 2 / 1_000_000  # YUYV worst-case bandwidth
+            print(
+                f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | fourcc={fourcc_str!r} | "
+                f"YUYV-equiv BW={usb_bw_mbps:.0f} MB/s | "
+                f"{'OK: camera using MJPEG (compressed)' if fourcc_str.strip() == 'MJPG' else 'WARNING: camera NOT using MJPG — high USB bandwidth!'}"
+            )
+
+            # Flush stale frames accumulated in the V4L2/driver buffer before
+            # entering the main loop, so the stream starts from a fresh frame.
+            for _ in range(4):
+                self.cap.grab()
+
             with self._stats_lock:
                 self.stats["video_fps"] = round(fps, 1)
                 self.stats["is_running"] = True
+                self.stats["camera_fourcc"] = fourcc_str.strip()
+                self.stats["camera_width"] = w
+                self.stats["camera_height"] = h
 
             self._frame_width = w
             self._frame_height = h
 
-            print(f"[READER] Opened: {w}x{h} @ {fps:.0f}fps | Live camera")
+            # Rolling reader-FPS measurement (updated every 30 frames)
+            _rfps_count = 0
+            _rfps_t0 = time.monotonic()
 
             while self.is_running:
                 ret, frame = self.cap.read()
@@ -76,6 +99,17 @@ class ReaderMixin:
 
                 self.frame_count += 1
                 frame_idx = self.frame_count
+
+                # Live reader FPS — measured from wall-clock, updated every 30 frames
+                _rfps_count += 1
+                if _rfps_count == 30:
+                    _rfps_t1 = time.monotonic()
+                    elapsed = _rfps_t1 - _rfps_t0
+                    if elapsed > 0:
+                        with self._stats_lock:
+                            self.stats["reader_fps"] = round(30.0 / elapsed, 1)
+                    _rfps_t0 = _rfps_t1
+                    _rfps_count = 0
 
                 # Optional live rotation (applies to stream + detector)
                 rot_steps = self._rotation_steps % 4

@@ -35,9 +35,13 @@ CREATE TABLE IF NOT EXISTS shifts (
     days_of_week    TEXT NOT NULL DEFAULT '[]',
     camera_source   TEXT DEFAULT '0',
     checkpoint_id   TEXT NOT NULL DEFAULT 'tracking',
+    enabled_pipelines TEXT DEFAULT '["pipeline_barcode_date","pipeline_anomaly"]',
     active          INTEGER DEFAULT 1,
     created_at      TEXT NOT NULL
 );
+
+-- Migration: add enabled_pipelines if it doesn't exist yet
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS enabled_pipelines TEXT DEFAULT '["pipeline_barcode_date","pipeline_anomaly"]';
 
 CREATE TABLE IF NOT EXISTS shift_variants (
     id          TEXT PRIMARY KEY,

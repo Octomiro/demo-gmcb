@@ -1,8 +1,3 @@
-"""Flask application — routes and entry point.
-
-Extracted from web_server_backend_v2.py.  No logic changes — pure move.
-"""
-
 from gevent import monkey
 monkey.patch_all(thread=False, queue=False, subprocess=False, signal=False, os=False)
 import gevent
@@ -79,13 +74,13 @@ def video_feed():
       ?low=1        → half resolution, quality 40, 5 fps  (saves ~80% bandwidth)
       ?quality=N    → JPEG quality 1-95  (default: use compositor's full-quality)
       ?scale=F      → resize factor 0.1-1.0  (default: 1.0 = full res)
-      ?fps=N        → target fps 1-30  (default: 15)
+      ?fps=N        → target fps 1-30  (default: 25)
     """
     from flask import request as flask_request
     low_mode = flask_request.args.get('low', '0') == '1'
     quality = int(flask_request.args.get('quality', 40 if low_mode else 0))
     scale = float(flask_request.args.get('scale', 0.5 if low_mode else 1.0))
-    fps = int(flask_request.args.get('fps', 5 if low_mode else 15))
+    fps = int(flask_request.args.get('fps', 5 if low_mode else 25))
     fps = max(1, min(30, fps))
     scale = max(0.1, min(1.0, scale))
     quality = max(1, min(95, quality)) if quality > 0 else 0
@@ -98,36 +93,62 @@ def video_feed():
     placeholder_bytes = buf.tobytes()
 
     def generate():
-        while True:
-            st = _view_state()
-            if st is not None:
-                with st._jpeg_lock:
-                    if low_mode:
-                        # Pre-encoded by compositor — zero decode in Flask
-                        jpeg = st._jpeg_bytes_low or st._jpeg_bytes
-                    else:
-                        jpeg = st._jpeg_bytes
-            else:
-                jpeg = None
+        last_seq = 0
+        # Track low-bandwidth clients so compositor knows when to encode low-res
+        if low_mode:
+            for _, st in _all_states():
+                st._low_clients_count = getattr(st, '_low_clients_count', 0) + 1
+        try:
+            while True:
+                st = _view_state()
+                if st is not None:
+                    # Poll for a new frame using gevent-friendly sleep
+                    # (threading.Event.wait blocks the gevent hub when threads aren't patched)
+                    deadline = time.monotonic() + sleep_interval
+                    while time.monotonic() < deadline:
+                        if st._jpeg_event.is_set():
+                            break
+                        gevent.sleep(0.005)  # yield to other greenlets
+                    st._jpeg_event.clear()
 
-            frame_bytes = jpeg if jpeg is not None else placeholder_bytes
+                    with st._jpeg_lock:
+                        cur_seq = st._jpeg_seq
+                        if low_mode:
+                            jpeg = st._jpeg_bytes_low or st._jpeg_bytes
+                        else:
+                            jpeg = st._jpeg_bytes
 
-            # Custom quality/scale (non-low): still needs per-viewer re-encode
-            if not low_mode and frame_bytes is not None and (quality > 0 or scale < 1.0):
-                arr = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
-                if arr is not None:
-                    if scale < 1.0:
-                        arr = cv2.resize(arr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                    enc_q = quality if quality > 0 else JPEG_QUALITY
-                    ret, buf2 = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, enc_q])
-                    if ret:
-                        frame_bytes = buf2.tobytes()
+                    # Skip if same frame (compositor hasn't produced a new one)
+                    if jpeg is not None and cur_seq == last_seq:
+                        gevent.sleep(0.005)
+                        continue
+                    last_seq = cur_seq
+                else:
+                    jpeg = None
+                    gevent.sleep(sleep_interval)
 
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n'
-                   b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n'
-                   + frame_bytes + b'\r\n')
-            gevent.sleep(sleep_interval)
+                frame_bytes = jpeg if jpeg is not None else placeholder_bytes
+
+                # Custom quality/scale (non-low): still needs per-viewer re-encode
+                if not low_mode and frame_bytes is not None and (quality > 0 or scale < 1.0):
+                    arr = cv2.imdecode(np.frombuffer(frame_bytes, np.uint8), cv2.IMREAD_COLOR)
+                    if arr is not None:
+                        if scale < 1.0:
+                            arr = cv2.resize(arr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                        enc_q = quality if quality > 0 else JPEG_QUALITY
+                        ret, buf2 = cv2.imencode('.jpg', arr, [cv2.IMWRITE_JPEG_QUALITY, enc_q])
+                        if ret:
+                            frame_bytes = buf2.tobytes()
+
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n'
+                       b'Content-Length: ' + str(len(frame_bytes)).encode() + b'\r\n\r\n'
+                       + frame_bytes + b'\r\n')
+        finally:
+            # Decrement low-client counter when stream closes
+            if low_mode:
+                for _, st in _all_states():
+                    st._low_clients_count = max(0, getattr(st, '_low_clients_count', 1) - 1)
 
     return Response(
         generate(),
@@ -149,15 +170,31 @@ def video_feed():
 def api_start():
     data = request.get_json(silent=True) or {}
     source_overrides = data.get("sources", {})
+    enabled_pipelines = data.get("enabled_pipelines")  # None = all enabled
+    # enabled_checks: which validation rules are enforced
+    # e.g. {"barcode": True, "date": False, "anomaly": True}
+    raw_checks = data.get("enabled_checks") or {}
+    enabled_checks = {
+        "barcode": bool(raw_checks.get("barcode", True)),
+        "date":    bool(raw_checks.get("date",    True)),
+        "anomaly": bool(raw_checks.get("anomaly", True)),
+    }
     results = {}
     for pipe_cfg in PIPELINES:
         pid = pipe_cfg["id"]
         st = pipelines.get(pid)
         if st is None:
             continue
+        if enabled_pipelines is not None and pid not in enabled_pipelines:
+            # Explicitly disabled — ensure it is stopped
+            if st.is_running:
+                st.stop_processing()
+            results[pid] = {"status": "skipped"}
+            continue
         source = source_overrides.get(pid, pipe_cfg["camera_source"])
         if isinstance(source, str) and source.isdigit():
             source = int(source)
+        st.set_enabled_checks(enabled_checks)
         results[pid] = st.start_processing(source)
     return jsonify({"status": "started", "pipelines": results})
 
@@ -308,6 +345,10 @@ def api_stats_toggle():
 
     results = {}
     for pid, st in _all_states():
+        # When enabling, only record on pipelines that are actually running
+        if new_active and not st.is_running:
+            results[pid] = {"stats_active": False, "session_id": None}
+            continue
         results[pid] = st.set_stats_recording(new_active, group_id=group_id)
     return jsonify({
         "stats_active": new_active,
@@ -748,26 +789,54 @@ def api_cameras():
 
 @app.route('/api/cameras/detect')
 def api_cameras_detect():
-    """Probe /dev/video* devices and report which ones OpenCV can open."""
+    """Probe /dev/video* devices and report which ones OpenCV can open.
+    When a pipeline is already holding a camera (V4L2 is exclusive and a
+    second open() would fail), we report info from the live pipeline stats
+    instead of trying to re-open the device."""
     import glob
     from tracking_config import CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT
     devices = sorted(glob.glob("/dev/video*"))
+
+    # Build map: camera_index → live stats snapshot (only for running pipelines)
+    active_cam_stats: dict = {}
+    for pid, state in pipeline_manager._all_states():
+        src = state.video_source
+        if isinstance(src, int) and state.is_running:
+            with state._stats_lock:
+                active_cam_stats[src] = dict(state.stats)
+
     results = []
     for dev in devices:
-        # Extract the numeric index (e.g. /dev/video2 → 2)
         try:
             idx = int(dev.replace("/dev/video", ""))
         except ValueError:
             continue
+
+        # Camera is currently held by a running pipeline — use its live stats
+        if idx in active_cam_stats:
+            s = active_cam_stats[idx]
+            results.append({
+                "device": dev,
+                "index": idx,
+                "available": True,
+                "in_use": True,
+                "width":  s.get("camera_width") or None,
+                "height": s.get("camera_height") or None,
+                "fps":    s.get("reader_fps") or s.get("video_fps") or None,
+                "reader_fps": s.get("reader_fps"),
+            })
+            continue
+
+        # Not in use — try to open it directly
         cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
         opened = cap.isOpened()
         width = height = fps = None
         if opened:
-            # Apply the same settings the pipeline uses so we report actual negotiated values
+            # V4L2 order: FOURCC → WIDTH → HEIGHT → FPS (last)
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+            cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
             width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps    = cap.get(cv2.CAP_PROP_FPS)
@@ -776,11 +845,13 @@ def api_cameras_detect():
             "device": dev,
             "index": idx,
             "available": opened,
+            "in_use": False,
             "width": width,
             "height": height,
             "fps": round(fps, 1) if fps is not None else None,
+            "reader_fps": None,
         })
-    # Also report which pipeline is currently using which source
+
     pipeline_sources = {pid: cfg["camera_source"] for pid, cfg in
                         [(p["id"], p) for p in __import__("tracking_config").PIPELINES]}
     return jsonify({"detected": results, "pipeline_sources": pipeline_sources})
@@ -1066,6 +1137,9 @@ def api_shifts_create():
     checkpoint_id = data.get("checkpoint_id", DEFAULT_CHECKPOINT_ID)
     if get_checkpoint(checkpoint_id) is None:
         return jsonify({"error": f"unknown checkpoint_id: {checkpoint_id}"}), 400
+    enabled_pipelines = data.get("enabled_pipelines", [p["id"] for p in PIPELINES])
+    if not isinstance(enabled_pipelines, list) or len(enabled_pipelines) == 0:
+        enabled_pipelines = [p["id"] for p in PIPELINES]
     existing = db_writer.get_all_shifts()
     new_days = set(d.lower() for d in days_of_week)
     for s in existing:
@@ -1110,6 +1184,7 @@ def api_shifts_create():
         "days_of_week": json.dumps([d.lower() for d in days_of_week]),
         "camera_source": camera_source,
         "checkpoint_id": checkpoint_id,
+        "enabled_pipelines": json.dumps(enabled_pipelines),
         "active": 1,
         "created_at": datetime.now(_TUNIS_TZ).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%S'),
     }
@@ -1167,6 +1242,10 @@ def api_shifts_update(shift_id):
         if get_checkpoint(data["checkpoint_id"]) is None:
             return jsonify({"error": f"unknown checkpoint_id: {data['checkpoint_id']}"}), 400
         fields["checkpoint_id"] = data["checkpoint_id"]
+    if "enabled_pipelines" in data:
+        ep = data["enabled_pipelines"]
+        if isinstance(ep, list) and len(ep) > 0:
+            fields["enabled_pipelines"] = json.dumps(ep)
     if not fields:
         return jsonify({"error": "no valid fields to update"}), 400
     ok = db_writer.update_shift(shift_id, fields)

@@ -280,6 +280,7 @@ export interface RecurringRule {
   startDate: string;
   endDate: string;
   weekdays: string[];
+  enabledPipelines: string[];
   autoStart: boolean;
   active: boolean;
   variants: RuleVariant[];
@@ -498,6 +499,7 @@ export function getDefaultRuleDraft(today: string) {
     startDate: today,
     endDate: addDays(today, 60),
     weekdays: ["mon", "tue", "wed", "thu", "fri"],
+    enabledPipelines: ["pipeline_barcode_date", "pipeline_anomaly"],
   };
 }
 

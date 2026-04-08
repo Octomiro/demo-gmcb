@@ -325,7 +325,7 @@ class DBWriter:
 
                 # Count defects grouped by hour
                 cur.execute(
-                    "SELECT EXTRACT(HOUR FROM crossed_at)::int AS hour, "
+                    "SELECT EXTRACT(HOUR FROM crossed_at::timestamp)::int AS hour, "
                     "COUNT(*) AS defect_count, "
                     "SUM(CASE WHEN defect_type = 'anomaly' THEN 1 ELSE 0 END)::int AS anomaly_count "
                     "FROM defective_packets WHERE session_id = %s "
@@ -338,7 +338,7 @@ class DBWriter:
                 # Since we only log defective packets, we derive from session totals
                 # Use session start/end to figure out which hours are active
                 cur.execute(
-                    "SELECT EXTRACT(HOUR FROM crossed_at)::int AS hour, COUNT(*) AS cnt "
+                    "SELECT EXTRACT(HOUR FROM crossed_at::timestamp)::int AS hour, COUNT(*) AS cnt "
                     "FROM defective_packets WHERE session_id = %s GROUP BY hour ORDER BY hour",
                     (session_id,),
                 )
@@ -654,6 +654,7 @@ class DBWriter:
             None, shift["days_of_week"],
             shift.get("camera_source", "0"),
             shift.get("checkpoint_id", "tracking"),
+            shift.get("enabled_pipelines", '["pipeline_barcode_date","pipeline_anomaly"]'),
             shift.get("active", 1),
             shift["created_at"],
         )
@@ -664,8 +665,8 @@ class DBWriter:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO shifts (id, label, type, start_time, end_time, start_date, end_date, "
-                    "session_date, days_of_week, camera_source, checkpoint_id, active, created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "session_date, days_of_week, camera_source, checkpoint_id, enabled_pipelines, active, created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
             conn.commit()
@@ -681,7 +682,7 @@ class DBWriter:
         if not self._available or not shift_id or not fields:
             return False
         allowed = {"label", "start_time", "end_time", "start_date", "end_date",
-                   "days_of_week", "camera_source", "checkpoint_id", "active"}
+                   "days_of_week", "camera_source", "checkpoint_id", "enabled_pipelines", "active"}
         cols = {k: v for k, v in fields.items() if k in allowed}
         if not cols:
             return False

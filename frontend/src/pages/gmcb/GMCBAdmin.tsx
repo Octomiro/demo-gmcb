@@ -98,6 +98,9 @@ const GMCBAdmin = () => {
   });
   const [shiftToDelete, setShiftToDelete] = useState<{ id: string, type: 'recurring' | 'single' } | null>(null);
   const [sessionModalOpen, setSessionModalOpen] = useState(false);
+  const [confirmSessionOpen, setConfirmSessionOpen] = useState(false);
+  // Which checks to enforce for the session (barcode/date independent, anomaly = pipeline_1)
+  const [enabledChecks, setEnabledChecks] = useState({ barcode: true, date: true, anomaly: true });
   const [scheduledStop, setScheduledStop] = useState<string | null>(null);
   const [stopTimeInput, setStopTimeInput] = useState("");
   const [adminStopPickerOpen, setAdminStopPickerOpen] = useState(false);
@@ -188,7 +191,15 @@ const GMCBAdmin = () => {
   async function startSession() {
     setSessionLoading(true);
     try {
-      await backendApi.startAll();
+      if (!enabledChecks.barcode && !enabledChecks.date && !enabledChecks.anomaly) {
+        toast.error("Activez au moins un contrôle avant de démarrer.");
+        return;
+      }
+      // Derive which physical pipelines to start from enabled checks
+      const enabledPipelines: string[] = [];
+      if (enabledChecks.barcode || enabledChecks.date) enabledPipelines.push("pipeline_barcode_date");
+      if (enabledChecks.anomaly) enabledPipelines.push("pipeline_anomaly");
+      await backendApi.startAll(undefined, enabledPipelines, enabledChecks);
       await backendApi.toggleRecording();
     } catch {
       toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
@@ -242,7 +253,7 @@ const GMCBAdmin = () => {
   }
 
   function openEditRecurringModal(rule: RecurringRule) {
-    setEditingRuleId(rule.id); setRuleDraft({ name: rule.name, start: rule.start, end: rule.end, startDate: rule.startDate, endDate: rule.endDate, weekdays: sortWeekdays(rule.weekdays) }); setRecurringModalOpen(true);
+    setEditingRuleId(rule.id); setRuleDraft({ name: rule.name, start: rule.start, end: rule.end, startDate: rule.startDate, endDate: rule.endDate, weekdays: sortWeekdays(rule.weekdays), enabledPipelines: rule.enabledPipelines ?? ["pipeline_barcode_date", "pipeline_anomaly"] }); setRecurringModalOpen(true);
   }
 
   function closeRecurringModal() { setEditingRuleId(null); setRuleDraft(getDefaultRuleDraft(today)); setRecurringModalOpen(false); }
@@ -297,6 +308,7 @@ const GMCBAdmin = () => {
           startDate: ruleDraft.startDate,
           endDate: ruleDraft.endDate,
           weekdays: sortWeekdays(ruleDraft.weekdays),
+          enabledPipelines: ruleDraft.enabledPipelines,
         });
         // Preserve local variants, trimming days no longer in the rule
         const allowed = new Set(updated.weekdays);
@@ -315,6 +327,7 @@ const GMCBAdmin = () => {
         startDate: ruleDraft.startDate,
         endDate: ruleDraft.endDate,
         weekdays: sortWeekdays(ruleDraft.weekdays),
+        enabledPipelines: ruleDraft.enabledPipelines,
       });
     } catch (err: any) {
       const raw = err?.message || "";
@@ -655,9 +668,11 @@ const GMCBAdmin = () => {
               </button>
             </>
           ) : (
-            <button onClick={() => startSession()} disabled={sessionLoading} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: sessionLoading ? 0.6 : 1 }}>
-              {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={15} />} Démarrer une session
-            </button>
+            <>
+              <button onClick={() => setConfirmSessionOpen(true)} disabled={sessionLoading} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: sessionLoading ? 0.6 : 1 }}>
+                {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={15} />} Démarrer une session
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -1049,6 +1064,24 @@ const GMCBAdmin = () => {
           </div>
           <div style={{ marginTop: 4, fontSize: 12, color: "#15803d", fontWeight: 600 }}>Ce shift démarrera automatiquement selon ce planning.</div>
         </div>
+        <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>Pipelines actifs</div>
+          {[
+            { id: "pipeline_barcode_date", label: "Barcode & Date" },
+            { id: "pipeline_anomaly", label: "Détection Anomalie" },
+          ].map(({ id, label }) => {
+            const checked = (ruleDraft.enabledPipelines ?? []).includes(id);
+            return (
+              <label key={id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", color: checked ? "#0f766e" : "#94a3b8", fontWeight: checked ? 600 : 400 }}>
+                <input type="checkbox" checked={checked}
+                  onChange={() => setRuleDraft((c) => { const cur = c.enabledPipelines ?? []; return { ...c, enabledPipelines: checked ? cur.filter((p) => p !== id) : [...cur, id] }; })}
+                  style={{ width: 15, height: 15, accentColor: "#0f766e", cursor: "pointer" }} />
+                {label}
+              </label>
+            );
+          })}
+          <div style={{ fontSize: 11, color: "#64748b" }}>Les pipelines non cochés ne seront pas démarrés lors de ce shift.</div>
+        </div>
       </AdminModal>
 
       {/* Rule action modal */}
@@ -1215,6 +1248,48 @@ const GMCBAdmin = () => {
           onSessionClick={() => { setHistoryDay(null); navigate("/clients/gmcb/historique"); }}
           openFeedbackModal={openFeedbackModal}
         />
+      )}
+
+      {/* Confirm session start dialog */}
+      {confirmSessionOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
+          <div style={{ background: "#fff", borderRadius: 16, padding: 28, maxWidth: 420, width: "90%", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Démarrer une session</div>
+            <div style={{ fontSize: 13, color: "#64748b", marginBottom: 20 }}>Choisissez les contrôles actifs pour cette session :</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
+              {([
+                { key: "barcode" as const, label: "Contrôle code-barres", desc: "Les paquets sans code-barres sont comptés NOK" },
+                { key: "date" as const, label: "Contrôle date", desc: "Les paquets sans date lisible sont comptés NOK" },
+                { key: "anomaly" as const, label: "Détection anomalie", desc: "Analyse visuelle des défauts de surface" },
+              ]).map(({ key, label, desc }) => {
+                const active = enabledChecks[key];
+                return (
+                  <label key={key} onClick={() => setEnabledChecks(prev => ({ ...prev, [key]: !prev[key] }))} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", borderRadius: 10, border: `1px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                    <div style={{ marginTop: 2, width: 18, height: 18, borderRadius: 4, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
+                      {active && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: active ? "#0f766e" : "#64748b" }}>{label}</div>
+                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>{desc}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setConfirmSessionOpen(false)} style={{ border: "1px solid #d0d5dd", borderRadius: 10, padding: "9px 16px", background: "#fff", color: "#475467", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                Annuler
+              </button>
+              <button
+                disabled={sessionLoading || (!enabledChecks.barcode && !enabledChecks.date && !enabledChecks.anomaly)}
+                onClick={() => { setConfirmSessionOpen(false); startSession(); }}
+                style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (sessionLoading || (!enabledChecks.barcode && !enabledChecks.date && !enabledChecks.anomaly)) ? 0.5 : 1 }}
+              >
+                {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={15} />} Confirmer
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
