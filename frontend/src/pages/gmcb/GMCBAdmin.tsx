@@ -253,7 +253,7 @@ const GMCBAdmin = () => {
   }
 
   function openEditRecurringModal(rule: RecurringRule) {
-    setEditingRuleId(rule.id); setRuleDraft({ name: rule.name, start: rule.start, end: rule.end, startDate: rule.startDate, endDate: rule.endDate, weekdays: sortWeekdays(rule.weekdays), enabledPipelines: rule.enabledPipelines ?? ["pipeline_barcode_date", "pipeline_anomaly"] }); setRecurringModalOpen(true);
+    setEditingRuleId(rule.id); setRuleDraft({ name: rule.name, start: rule.start, end: rule.end, startDate: rule.startDate, endDate: rule.endDate, weekdays: sortWeekdays(rule.weekdays), enabledPipelines: rule.enabledPipelines ?? ["pipeline_barcode_date", "pipeline_anomaly"], enabledChecks: rule.enabledChecks ?? { barcode: true, date: true, anomaly: true } }); setRecurringModalOpen(true);
   }
 
   function closeRecurringModal() { setEditingRuleId(null); setRuleDraft(getDefaultRuleDraft(today)); setRecurringModalOpen(false); }
@@ -301,6 +301,8 @@ const GMCBAdmin = () => {
     }
     if (editingRuleId) {
       try {
+        const ec = ruleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+        const ep = [...((ec.barcode || ec.date) ? ["pipeline_barcode_date"] : []), ...(ec.anomaly ? ["pipeline_anomaly"] : [])];
         const updated = await updateShift(editingRuleId, {
           name: ruleDraft.name,
           start: ruleDraft.start,
@@ -308,7 +310,8 @@ const GMCBAdmin = () => {
           startDate: ruleDraft.startDate,
           endDate: ruleDraft.endDate,
           weekdays: sortWeekdays(ruleDraft.weekdays),
-          enabledPipelines: ruleDraft.enabledPipelines,
+          enabledPipelines: ep,
+          enabledChecks: ec,
         });
         // Preserve local variants, trimming days no longer in the rule
         const allowed = new Set(updated.weekdays);
@@ -320,6 +323,8 @@ const GMCBAdmin = () => {
       setEditingRuleId(null); setRuleDraft(getDefaultRuleDraft(today)); setRecurringModalOpen(false); return;
     }
     try {
+      const ec = ruleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+      const ep = [...((ec.barcode || ec.date) ? ["pipeline_barcode_date"] : []), ...(ec.anomaly ? ["pipeline_anomaly"] : [])];
       await createShift({
         name: ruleDraft.name,
         start: ruleDraft.start,
@@ -327,7 +332,8 @@ const GMCBAdmin = () => {
         startDate: ruleDraft.startDate,
         endDate: ruleDraft.endDate,
         weekdays: sortWeekdays(ruleDraft.weekdays),
-        enabledPipelines: ruleDraft.enabledPipelines,
+        enabledPipelines: ep,
+        enabledChecks: ec,
       });
     } catch (err: any) {
       const raw = err?.message || "";
@@ -378,7 +384,7 @@ const GMCBAdmin = () => {
     }
     const name = getNextShiftNameForDate(singleDraft.date, recurringRules, oneOffSessions);
     try {
-      await addOneOff({ label: name, date: singleDraft.date, start_time: singleDraft.start, end_time: singleDraft.end });
+      await addOneOff({ label: name, date: singleDraft.date, start_time: singleDraft.start, end_time: singleDraft.end, enabled_checks: singleDraft.enabledChecks });
       toast.success(`${name} créé avec succès (${singleDraft.start}–${singleDraft.end})`);
       setSingleDraft(getDefaultSingleDraft(selectedDate));
       setSingleModalOpen(false);
@@ -867,6 +873,26 @@ const GMCBAdmin = () => {
                         <div style={{ fontSize: 12, color: "#98a2b3" }}>
                           Actif du {formatAdminDate(rule.startDate, { day: "2-digit", month: "2-digit", year: "numeric" })} au {formatAdminDate(rule.endDate, { day: "2-digit", month: "2-digit", year: "numeric" })}
                         </div>
+                        {(() => {
+                          const ec = rule.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+                          const checks = [
+                            { key: "barcode", label: "Barcode" },
+                            { key: "date", label: "Date" },
+                            { key: "anomaly", label: "Anomalie" },
+                          ] as const;
+                          return (
+                            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                              {checks.map(({ key, label }) => {
+                                const on = ec[key];
+                                return (
+                                  <span key={key} style={{ padding: "2px 8px", borderRadius: 999, background: on ? "#dcfce7" : "#fee2e2", color: on ? "#15803d" : "#dc2626", fontSize: 11, fontWeight: 700 }}>
+                                    {label} {on ? "✓" : "OFF"}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
                         {variantSummaries.map((s) => (
                           <button key={s.id} onClick={() => openExistingVariantModal(rule, s.variant)} style={{ fontSize: 13, lineHeight: 1.6, color: s.tone === "danger" ? "#dc2626" : "#475467", fontWeight: 500, background: "transparent", border: "none", padding: 0, textAlign: "left", cursor: "pointer", textDecoration: "underline", textUnderlineOffset: 3 }}>
                             {s.text}
@@ -980,6 +1006,26 @@ const GMCBAdmin = () => {
                       {session.source === "rule" && <span style={{ padding: "4px 8px", borderRadius: 999, background: "#dcfce7", color: "#15803d", fontSize: 11, fontWeight: 700 }}>Automatique</span>}
                     </div>
                     <div style={{ fontSize: 13, color: "#667085" }}>{session.start} - {session.end}</div>
+                    {(() => {
+                      const ec = session.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+                      const checks = [
+                        { key: "barcode", label: "Barcode" },
+                        { key: "date", label: "Date" },
+                        { key: "anomaly", label: "Anomalie" },
+                      ] as const;
+                      return (
+                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
+                          {checks.map(({ key, label }) => {
+                            const on = ec[key];
+                            return (
+                              <span key={key} style={{ padding: "2px 7px", borderRadius: 999, background: on ? "#f0fdf4" : "#fee2e2", color: on ? "#15803d" : "#dc2626", fontSize: 11, fontWeight: 700, border: `1px solid ${on ? "#bbf7d0" : "#fecaca"}` }}>
+                                {label} {on ? "✓" : "OFF"}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
                     {session.disabled && <div style={{ fontSize: 12, color: "#dc2626", fontWeight: 700, marginTop: 6 }}>Désactivée pour cette date</div>}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "nowrap", whiteSpace: "nowrap" }}>
@@ -1065,22 +1111,26 @@ const GMCBAdmin = () => {
           <div style={{ marginTop: 4, fontSize: 12, color: "#15803d", fontWeight: 600 }}>Ce shift démarrera automatiquement selon ce planning.</div>
         </div>
         <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>Pipelines actifs</div>
-          {[
-            { id: "pipeline_barcode_date", label: "Barcode & Date" },
-            { id: "pipeline_anomaly", label: "Détection Anomalie" },
-          ].map(({ id, label }) => {
-            const checked = (ruleDraft.enabledPipelines ?? []).includes(id);
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>Contrôles qualité actifs</div>
+          {([
+            { key: "barcode" as const, label: "Code-barres", desc: "Les paquets sans code-barres seront comptés NOK" },
+            { key: "date" as const, label: "Date", desc: "Les paquets sans date lisible seront comptés NOK" },
+            { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle des défauts de surface (désactiver éteint le pipeline anomalie)" },
+          ]).map(({ key, label, desc }) => {
+            const active = (ruleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true })[key];
             return (
-              <label key={id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, cursor: "pointer", color: checked ? "#0f766e" : "#94a3b8", fontWeight: checked ? 600 : 400 }}>
-                <input type="checkbox" checked={checked}
-                  onChange={() => setRuleDraft((c) => { const cur = c.enabledPipelines ?? []; return { ...c, enabledPipelines: checked ? cur.filter((p) => p !== id) : [...cur, id] }; })}
-                  style={{ width: 15, height: 15, accentColor: "#0f766e", cursor: "pointer" }} />
-                {label}
+              <label key={key} onClick={() => setRuleDraft((c) => ({ ...c, enabledChecks: { ...(c.enabledChecks ?? { barcode: true, date: true, anomaly: true }), [key]: !active } }))} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 12px", borderRadius: 8, border: `1px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                <div style={{ marginTop: 2, width: 16, height: 16, borderRadius: 4, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {active && <svg width="9" height="7" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: active ? "#0f766e" : "#64748b" }}>{label}</div>
+                  <div style={{ fontSize: 11, color: "#94a3b8" }}>{desc}</div>
+                </div>
               </label>
             );
           })}
-          <div style={{ fontSize: 11, color: "#64748b" }}>Les pipelines non cochés ne seront pas démarrés lors de ce shift.</div>
+          <div style={{ fontSize: 11, color: "#64748b" }}>Les contrôles désactivés ne génèrent pas de NOK pour ce type — cette info sera visible dans les rapports.</div>
         </div>
       </AdminModal>
 
@@ -1139,25 +1189,48 @@ const GMCBAdmin = () => {
       </AdminModal>
 
       {/* Single session modal */}
-      <AdminModal open={singleModalOpen} title="Ajouter un shift ponctuel" subtitle={`Ce shift sera ajouté uniquement pour le ${formatAdminDate(singleDraft.date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}.`} onClose={closeSingleModal}
+      <AdminModal open={singleModalOpen} title="Shift ponctuel" subtitle={`Ajouté uniquement pour le ${formatAdminDate(singleDraft.date, { weekday: "long", day: "numeric", month: "long" })}.`} onClose={closeSingleModal}
         footer={<>
           <button onClick={closeSingleModal} style={{ border: "1px solid #d0d5dd", borderRadius: 12, padding: "10px 14px", background: "#fff", color: "#475467", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Annuler</button>
-          <button onClick={addSingleSession} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} />Ajouter au calendrier</button>
+          <button onClick={addSingleSession} style={{ border: "none", borderRadius: 12, padding: "10px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} />Confirmer</button>
         </>}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
+        {/* Name + times row */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
-            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Nom généré</div>
-            <div style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13, background: "#f8fafc", color: "#0f172a", fontWeight: 700, display: "flex", alignItems: "center" }}>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 5 }}>Nom généré</div>
+            <div style={{ padding: "10px 12px", borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 13, background: "#f8fafc", color: "#0f172a", fontWeight: 700 }}>
               {getNextShiftNameForDate(singleDraft.date, recurringRules, oneOffSessions)}
             </div>
           </div>
           <div>
-            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Début</div>
-            <input type="time" value={singleDraft.start} onChange={(e) => setSingleDraft({ ...singleDraft, start: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13 }} />
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 5 }}>Début</div>
+            <input type="time" value={singleDraft.start} onChange={(e) => setSingleDraft({ ...singleDraft, start: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13, boxSizing: "border-box" }} />
           </div>
           <div>
-            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Fin</div>
-            <input type="time" value={singleDraft.end} onChange={(e) => setSingleDraft({ ...singleDraft, end: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13 }} />
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 5 }}>Fin (arrêt)</div>
+            <input type="time" value={singleDraft.end} onChange={(e) => setSingleDraft({ ...singleDraft, end: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13, boxSizing: "border-box" }} />
+          </div>
+        </div>
+        {/* Checks */}
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 8 }}>Contrôles qualité actifs</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            {([
+              { key: "barcode" as const, label: "Code-barres", desc: "NOK si absent" },
+              { key: "date" as const, label: "Date", desc: "NOK si illisible" },
+              { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle" },
+            ]).map(({ key, label, desc }) => {
+              const active = (singleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true })[key];
+              return (
+                <label key={key} onClick={() => setSingleDraft((c) => ({ ...c, enabledChecks: { ...(c.enabledChecks ?? { barcode: true, date: true, anomaly: true }), [key]: !active } }))} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "12px 10px", borderRadius: 12, border: `2px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s", textAlign: "center" }}>
+                  <div style={{ width: 20, height: 20, borderRadius: 6, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {active && <svg width="11" height="9" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: active ? "#0f766e" : "#64748b" }}>{label}</div>
+                  <div style={{ fontSize: 10, color: "#94a3b8", lineHeight: 1.3 }}>{desc}</div>
+                </label>
+              );
+            })}
           </div>
         </div>
       </AdminModal>

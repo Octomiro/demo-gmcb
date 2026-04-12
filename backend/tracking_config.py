@@ -21,12 +21,12 @@ CHECKPOINTS = [
     {
         "id":            "anomaly",
         "label":         "Segmentation + Anomaly Detection",
-        "path":          "yolo26m_seg_farine_FV.pt",
+        "path":          "yolo26m_seg_farine_FV_v3.pt",
         "mode":          "anomaly",
         "package_class": "farine",
         "barcode_class": None,
         # YOLO overrides for segmentation quality
-        "yolo_imgsz":    640,
+        "yolo_imgsz":    960,
         "yolo_conf":     0.5,
         # EfficientAD model paths
         "ad_teacher":    "teacher_best.pth",
@@ -38,13 +38,13 @@ CHECKPOINTS = [
         "ad_strategy":   "MAJORITY",
         "ad_margin_pct": 0.1,
         "ad_erosion_size": 3,
-        "ad_max_scans":  5,
+        "ad_max_scans":  7,
         # Zone: start/end scanning as % of frame width
         # Packets flow RIGHT → LEFT:
         #   zone_end_pct   = ENTRY line (right side, where scanning begins)
         #   zone_start_pct = EXIT  line (left side, decision is locked & queued)
         "zone_start_pct": 0.20,
-        "zone_end_pct":   0.80,
+        "zone_end_pct":   0.72,
     },
 ]
 
@@ -107,8 +107,8 @@ CONFIG = {
 # CAMERA DEFAULTS
 # ==========================
 CAMERA_FPS = 30
-CAMERA_WIDTH = 1280
-CAMERA_HEIGHT = 720
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
 
 # ==========================
 # COMPOSITOR
@@ -122,10 +122,10 @@ SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
 
 # ==========================
-DETECTOR_FRAME_SKIP = 2
+DETECTOR_FRAME_SKIP = 1
 
 #(segmentation + EfficientAD),
-ANOMALY_FRAME_SKIP = 3
+ANOMALY_FRAME_SKIP = 1
 
  
 # ==========================

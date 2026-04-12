@@ -19,6 +19,7 @@ export interface Session {
   nok_no_barcode: number;
   nok_no_date: number;
   nok_anomaly: number;
+  enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean } | null;
   sessions?: Session[];  // raw sub-sessions inside a merged group
 }
 

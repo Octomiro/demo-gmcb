@@ -23,6 +23,13 @@ export interface PipelineStats {
     inference_ms: number;
   };
   db_connected: boolean;
+  enabled_checks: { barcode: boolean; date: boolean; anomaly: boolean };
+}
+
+export interface ActiveChecks {
+  barcode: boolean;
+  date: boolean;
+  anomaly: boolean;
 }
 
 export interface LiveStats {
@@ -42,6 +49,7 @@ export interface LiveStats {
   sessionId1: string | null;
   fifoQueue: string[];
   dbConnected: boolean;
+  activeChecks: ActiveChecks;
   loading: boolean;
   error: string | null;
 }
@@ -90,7 +98,9 @@ export function useLiveStats(): LiveStats {
   const nokDate = p0?.nok_no_date ?? 0;
   const nokAnomaly = p1?.nok_anomaly ?? 0;
   const totalNok = nokBarcode + nokDate + nokAnomaly;
-  const conformes = totalPackets - totalNok;
+  // conformes = packets confirmed OK by p0 (barcode+date), minus anomaly NOKs from p1.
+  // Using packages_ok directly avoids negative counts when p0 total < sum of NOK types.
+  const conformes = Math.max(0, (p0?.packages_ok ?? 0) - nokAnomaly);
   const conformityPct =
     totalPackets > 0
       ? Math.round((conformes / totalPackets) * 100 * 100) / 100
@@ -116,6 +126,11 @@ export function useLiveStats(): LiveStats {
     sessionId1: p1?.session_id ?? null,
     fifoQueue: p0?.fifo_queue ?? [],
     dbConnected: p0?.db_connected ?? p1?.db_connected ?? true,
+    activeChecks: {
+      barcode: p0?.stats_active ? (p0.enabled_checks?.barcode ?? true) : false,
+      date:    p0?.stats_active ? (p0.enabled_checks?.date    ?? true) : false,
+      anomaly: p1?.stats_active ? (p1.enabled_checks?.anomaly ?? true) : false,
+    },
     loading,
     error,
   };

@@ -10,8 +10,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     ok_count        INTEGER DEFAULT 0,
     nok_no_barcode  INTEGER DEFAULT 0,
     nok_no_date     INTEGER DEFAULT 0,
-    nok_anomaly     INTEGER DEFAULT 0
+    nok_anomaly     INTEGER DEFAULT 0,
+    enabled_checks  TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}'
 );
+
+-- Migration: add enabled_checks to sessions if it doesn't exist yet
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS enabled_checks TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}';
 
 CREATE TABLE IF NOT EXISTS defective_packets (
     id              SERIAL PRIMARY KEY,
@@ -36,12 +40,15 @@ CREATE TABLE IF NOT EXISTS shifts (
     camera_source   TEXT DEFAULT '0',
     checkpoint_id   TEXT NOT NULL DEFAULT 'tracking',
     enabled_pipelines TEXT DEFAULT '["pipeline_barcode_date","pipeline_anomaly"]',
+    enabled_checks  TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}',
     active          INTEGER DEFAULT 1,
     created_at      TEXT NOT NULL
 );
 
 -- Migration: add enabled_pipelines if it doesn't exist yet
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS enabled_pipelines TEXT DEFAULT '["pipeline_barcode_date","pipeline_anomaly"]';
+-- Migration: add enabled_checks if it doesn't exist yet
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS enabled_checks TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}';
 
 CREATE TABLE IF NOT EXISTS shift_variants (
     id          TEXT PRIMARY KEY,

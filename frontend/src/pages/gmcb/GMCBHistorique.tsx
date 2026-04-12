@@ -622,8 +622,26 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
                               Interrompue
                             </span>
                           )}
+
                         </div>
-                        <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{startH} – {endH} • {(s.checkpoint_ids?.join(" + ") ?? s.checkpoint_id) || "—"}</div>
+                        <div style={{ fontSize: 12, color: "#888", marginTop: 2, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4 }}>
+                          <span>{startH} – {endH}</span>
+                          {(() => {
+                            const ec = s.enabled_checks ?? {
+                              barcode: (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("barcode")),
+                              date:    (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("barcode")),
+                              anomaly: (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("anomaly")),
+                            };
+                            return ([{ key: "barcode", label: "Barcode" }, { key: "date", label: "Date" }, { key: "anomaly", label: "Anomalie" }] as const).map(({ key, label }) => {
+                              const on = ec[key];
+                              return (
+                                <span key={key} style={{ padding: "1px 7px", borderRadius: 999, background: on ? "#dcfce7" : "#fee2e2", color: on ? "#15803d" : "#dc2626", fontSize: 10, fontWeight: 700, border: `1px solid ${on ? "#bbf7d0" : "#fecaca"}` }}>
+                                  {label}{on ? " ✓" : " OFF"}
+                                </span>
+                              );
+                            });
+                          })()}
+                        </div>
                         {isInterrupted && (
                           <div style={{ fontSize: 11, color: "#c2410c", marginTop: 6 }}>
                             Arrêt avant la fin prévue, survolez l’icône d’alerte pour le détail.
@@ -1013,7 +1031,24 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
           </div>
           <div>
             <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800 }}>Session — {dayLabel}</h1>
-            <p style={{ margin: 0, fontSize: 13, color: "#777" }}>{startH} – {endH} • {(session.checkpoint_ids?.join(" + ") ?? session.checkpoint_id) || "—"}</p>
+            <p style={{ margin: 0, fontSize: 13, color: "#777", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 5 }}>
+              <span>{startH} – {endH}</span>
+              {(() => {
+                const ec = session.enabled_checks ?? {
+                  barcode: (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("barcode")),
+                  date:    (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("barcode")),
+                  anomaly: (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("anomaly")),
+                };
+                return ([{ key: "barcode", label: "Barcode" }, { key: "date", label: "Date" }, { key: "anomaly", label: "Anomalie" }] as const).map(({ key, label }) => {
+                  const on = ec[key];
+                  return (
+                    <span key={key} style={{ padding: "2px 8px", borderRadius: 999, background: on ? "#dcfce7" : "#fee2e2", color: on ? "#15803d" : "#dc2626", fontSize: 11, fontWeight: 700, border: `1px solid ${on ? "#bbf7d0" : "#fecaca"}` }}>
+                      {label}{on ? " ✓" : " OFF"}
+                    </span>
+                  );
+                });
+              })()}
+            </p>
           </div>
         </div>
         <button onClick={() => openFeedbackModal({ scope: "session", sessionId: session.id, date: daySummary.date })} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 8, border: "1px solid #fde68a", background: "#fffbeb", fontSize: 13, cursor: "pointer", fontWeight: 500, color: "#92400e" }}>

@@ -46,6 +46,10 @@ function backendToRule(s: BackendShift): RecurringRule {
       try { const p = JSON.parse(s.enabled_pipelines ?? ''); return Array.isArray(p) ? p : ["pipeline_barcode_date", "pipeline_anomaly"]; }
       catch { return ["pipeline_barcode_date", "pipeline_anomaly"]; }
     })(),
+    enabledChecks: (() => {
+      try { const c = JSON.parse(s.enabled_checks ?? ''); return typeof c === "object" && c !== null ? { barcode: c.barcode !== false, date: c.date !== false, anomaly: c.anomaly !== false } : { barcode: true, date: true, anomaly: true }; }
+      catch { return { barcode: true, date: true, anomaly: true }; }
+    })(),
     autoStart: true,
     active: s.active === 1,
     variants: (s.variants ?? []).map(backendVariantToRuleVariant),
@@ -65,6 +69,7 @@ function ruleDraftToPayload(draft: {
   camera_source?: string;
   checkpoint_id?: string;
   enabledPipelines?: string[];
+  enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }): CreateShiftPayload {
   return {
     label: draft.name,
@@ -76,6 +81,7 @@ function ruleDraftToPayload(draft: {
     ...(draft.camera_source !== undefined && { camera_source: draft.camera_source }),
     ...(draft.checkpoint_id !== undefined && { checkpoint_id: draft.checkpoint_id }),
     ...(draft.enabledPipelines !== undefined && { enabled_pipelines: draft.enabledPipelines }),
+    ...(draft.enabledChecks !== undefined && { enabled_checks: draft.enabledChecks }),
   };
 }
 
@@ -169,6 +175,7 @@ export function useShifts(): UseShiftsReturn {
   const createShift = useCallback(async (draft: {
     name: string; start: string; end: string; startDate?: string; endDate?: string; weekdays: string[];
     camera_source?: string; checkpoint_id?: string;
+    enabledPipelines?: string[]; enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
   }) => {
     mutating.current = true;
     try {
@@ -183,6 +190,7 @@ export function useShifts(): UseShiftsReturn {
   const updateShift = useCallback(async (id: string, fields: Partial<{
     name: string; start: string; end: string; startDate: string; endDate: string; weekdays: string[];
     camera_source?: string; checkpoint_id?: string; enabledPipelines?: string[];
+    enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
   }>) => {
     const payload: UpdateShiftPayload = {
       ...(fields.name !== undefined && { label: fields.name }),
@@ -194,6 +202,7 @@ export function useShifts(): UseShiftsReturn {
       ...(fields.camera_source !== undefined && { camera_source: fields.camera_source }),
       ...(fields.checkpoint_id !== undefined && { checkpoint_id: fields.checkpoint_id }),
       ...(fields.enabledPipelines !== undefined && { enabled_pipelines: fields.enabledPipelines }),
+      ...(fields.enabledChecks !== undefined && { enabled_checks: fields.enabledChecks }),
     };
     mutating.current = true;
     try {

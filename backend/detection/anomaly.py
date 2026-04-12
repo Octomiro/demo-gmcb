@@ -124,6 +124,7 @@ class AnomalyMixin:
         map_combined = torch.nn.functional.interpolate(
             map_combined, (orig_h, orig_w), mode='bilinear')
         score = map_combined[0, 0].cpu().numpy().max()
+        del img_tensor, map_combined
 
         thresh = (self.current_checkpoint or {}).get("ad_thresh", 5000.0)
         return score > thresh, float(score)
@@ -171,6 +172,11 @@ class AnomalyMixin:
             score = m[0, 0].cpu().numpy().max()
             results.append((score > thresh, float(score)))
 
+        del batch, map_combined, m
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         return results
 
     @staticmethod
@@ -201,25 +207,39 @@ class AnomalyMixin:
         crops = tstate.get("crops", [])
         scores = tstate.get("scores", [])
 
-        # Save worst crop image
+        # Save worst crop image — use raw (unmasked) crop for clarity
+        raw_crops = tstate.get("raw_crops", [])
         if crops and scores:
             worst_idx = max(range(len(scores)), key=lambda i: scores[i])
             img_path = os.path.join(base, f"packet_{pkt_num}.webp")
             try:
-                bgr = cv2.cvtColor(crops[worst_idx], cv2.COLOR_RGB2BGR)
+                proof_img = raw_crops[worst_idx] if worst_idx < len(raw_crops) else crops[worst_idx]
+                bgr = cv2.cvtColor(proof_img, cv2.COLOR_RGB2BGR)
                 cv2.imwrite(img_path, bgr, [cv2.IMWRITE_WEBP_QUALITY, 85])
-                print(f"[AD] Saved NOK packet #{pkt_num} -> {img_path}")
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "[AD] Saved NOK packet #%s -> %s", pkt_num, img_path
+                )
             except Exception as e:
                 print(f"[AD] Failed to save {img_path}: {e}")
 
     def _save_nok_packet_bg(self, pkt_num, tstate, checkpoint):
-        """Fire-and-forget: save NOK image+CSV via bounded thread pool."""
+        """Fire-and-forget: save NOK image via bounded thread pool.
+        Drops task if queue is backing up to prevent RAM exhaustion."""
         from detection.base import _proof_executor
-        # Snapshot data; capture session_id now so folder is stable even if session changes
+        # Guard: drop if too many tasks are already queued (disk too slow)
+        try:
+            queue_depth = _proof_executor._work_queue.qsize()
+        except Exception:
+            queue_depth = 0
+        if queue_depth > 50:
+            print(f"[AD] Proof queue full ({queue_depth}), dropping NOK image for packet #{pkt_num}")
+            return
         data = {
             'results': list(tstate.get('results', [])),
             'scores': list(tstate.get('scores', [])),
             'crops': list(tstate.get('crops', [])),
+            'raw_crops': list(tstate.get('raw_crops', [])),
         }
         session_now = self._db_session_id if self._stats_active else None
         cp_copy = dict(checkpoint)
@@ -227,6 +247,40 @@ class AnomalyMixin:
             self._save_nok_packet,
             pkt_num, data, cp_copy, session_now,
         )
+
+    # ─────────────────────────────────────────
+    # CSV SCAN-RESULTS LOGGER
+    # ─────────────────────────────────────────
+
+    def _csv_write_packet(self, pkt_num, tid, is_def, scores, n_scans):
+        """Append one row per packet to anomaly_scan_results.csv in liveImages."""
+        import csv
+        from datetime import datetime
+        csv_path = LIVE_IMAGES_ROOT / "anomaly_scan_results.csv"
+        write_header = not csv_path.exists()
+        try:
+            with open(csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow([
+                        "timestamp", "session_id", "packet_num", "track_id",
+                        "decision", "n_scans", "max_score", "mean_score", "all_scores",
+                    ])
+                max_s = max(scores) if scores else 0.0
+                mean_s = sum(scores) / len(scores) if scores else 0.0
+                writer.writerow([
+                    datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
+                    self._db_session_id or "",
+                    pkt_num or "",
+                    tid,
+                    "NOK" if is_def else "OK",
+                    n_scans,
+                    f"{max_s:.1f}",
+                    f"{mean_s:.1f}",
+                    ";".join(f"{s:.1f}" for s in scores),
+                ])
+        except Exception as e:
+            print(f"[AD] CSV write error: {e}")
 
     # ─────────────────────────────────────────
     # ANOMALY-MODE FRAME PROCESSOR
@@ -242,7 +296,7 @@ class AnomalyMixin:
         zone_start_pct = cp.get("zone_start_pct", 0.20)
         zone_end_pct = cp.get("zone_end_pct", 0.60)
         ad_strategy = cp.get("ad_strategy", "MAJORITY")
-        ad_max_scans = cp.get("ad_max_scans", 5)
+        ad_max_scans = cp.get("ad_max_scans", 7)
         h_f, w_f = frame.shape[:2]
         # Packets flow RIGHT → LEFT:
         #   zone_end_px   = ENTRY line (right, where scanning begins)
@@ -262,15 +316,16 @@ class AnomalyMixin:
             track_ids = results.boxes.id.int().cpu().tolist()
 
             # ── PHASE 1: Classify each track + collect crops (CPU only) ──
-            ad_batch_crops = []    # crops to send to EfficientAD
-            ad_batch_indices = []  # index into track_ids for each crop
+            ad_batch_crops = []      # masked crops to send to EfficientAD
+            ad_batch_raw_crops = []  # raw (unmasked) crops for proof images
+            ad_batch_indices = []    # index into track_ids for each crop
             per_track_info = []    # (i, tid, x1, y1, x2, y2, zone) per track
 
             for i, tid in enumerate(track_ids):
                 if tid not in self._ad_track_states:
                     self._ad_track_states[tid] = {
                         'results': [], 'scores': [],
-                        'crops': [], 'decision': None,
+                        'crops': [], 'raw_crops': [], 'decision': None,
                     }
                 tstate = self._ad_track_states[tid]
 
@@ -287,6 +342,9 @@ class AnomalyMixin:
                         img_crop = self._ad_crop_and_mask(frame, masks[i], cp)
                         if img_crop is not None:
                             ad_batch_crops.append(img_crop)
+                            # Raw (unmasked) bbox crop for the proof image
+                            raw_bgr = frame[max(0, y1):min(h_f, y2), max(0, x1):min(w_f, x2)]
+                            ad_batch_raw_crops.append(cv2.cvtColor(raw_bgr, cv2.COLOR_BGR2RGB))
                             ad_batch_indices.append(i)
                     per_track_info.append((i, tid, x1, y1, x2, y2, 'scanning'))
                 else:
@@ -331,9 +389,11 @@ class AnomalyMixin:
                     batch_result = ad_result_by_idx.get(i)
                     if batch_result is not None:
                         is_def, score = batch_result
+                        batch_pos = ad_batch_indices.index(i)
                         tstate['results'].append(is_def)
                         tstate['scores'].append(score)
-                        tstate['crops'].append(ad_batch_crops[ad_batch_indices.index(i)].copy())
+                        tstate['crops'].append(ad_batch_crops[batch_pos].copy())
+                        tstate['raw_crops'].append(ad_batch_raw_crops[batch_pos].copy())
                     elif batch_result is None and i in ad_result_by_idx:
                         # Batch error for this crop
                         label = f"T{tid} AD-ERR"
@@ -348,6 +408,8 @@ class AnomalyMixin:
                     tstate['decision'] = self._ad_final_decision(
                         tstate['results'], strategy=ad_strategy)
                     is_def = tstate['decision']
+                    _scores_snap = list(tstate['scores'])
+                    _n_scans = len(tstate['results'])
 
                     self.packets_crossed_line.add(tid)
                     self.total_packets += 1
@@ -363,12 +425,16 @@ class AnomalyMixin:
                         self._nok_anomaly += 1
 
                     if is_def:
-                        print(f"[AD] Packet #{self.total_packets} -> NOK "
-                              f"(scans={len(tstate['results'])})")
+                        import logging as _logging
+                        _logging.getLogger(__name__).debug(
+                            "[AD] Packet #%d -> NOK (scans=%d)",
+                            self.total_packets, len(tstate['results'])
+                        )
                         self._save_nok_packet_bg(
                             self.total_packets, tstate, cp)
 
                     tstate['crops'] = []
+                    tstate['raw_crops'] = []
                     tstate['scores'] = []
 
                     if self._stats_active:
@@ -388,7 +454,8 @@ class AnomalyMixin:
                                     "nok_anomaly": self._nok_anomaly,
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("session_update")
                         # Record defective packet with timestamp for ejection
                         if is_def:
                             try:
@@ -401,9 +468,11 @@ class AnomalyMixin:
                                     "crossed_at": datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f'),
                                 })
                             except Exception:
-                                pass
+                                if self._db_writer:
+                                    self._db_writer.log_dropped("crossing")
 
                     pkt_num = self.packet_numbers.get(tid)
+                    self._csv_write_packet(pkt_num, tid, is_def, _scores_snap, _n_scans)
                     if is_def:
                         label = f"#{pkt_num} DEFECTIVE" if pkt_num else f"T{tid} DEFECTIVE"
                         color = (0, 0, 255)
@@ -412,6 +481,23 @@ class AnomalyMixin:
                         color = (0, 255, 0)
 
                 track_boxes.append((x1, y1, x2, y2, label, color))
+
+        # Prune tracks that are no longer active:
+        # - decided tracks that have left the frame (normal exit)
+        # - abandoned tracks with no decision that disappeared (occlusion/ID switch)
+        active_tids = set(track_ids) if (has_masks and has_ids) else set()
+        dead_tids = [
+            tid for tid, st in self._ad_track_states.items()
+            if tid not in active_tids and (
+                st['decision'] is not None or  # decided and gone
+                (st['decision'] is None and len(st.get('crops', [])) > 0)  # abandoned mid-scan
+            )
+        ]
+        for tid in dead_tids:
+            # Explicitly clear crop arrays before deleting to free numpy memory immediately
+            self._ad_track_states[tid]['crops'] = []
+            self._ad_track_states[tid]['scores'] = []
+            del self._ad_track_states[tid]
 
         det_ms = (time.time() - t_start) * 1000
         det_fps = 1000 / det_ms if det_ms > 0 else 0

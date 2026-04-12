@@ -43,6 +43,7 @@ export interface BackendShift {
   camera_source: string;
   checkpoint_id: string;
   enabled_pipelines?: string;  // JSON string e.g. '["pipeline_barcode_date"]'
+  enabled_checks?: string;     // JSON string e.g. '{"barcode":true,"date":true,"anomaly":true}'
   active: number;          // 1 | 0
   created_at: string;
   variants?: BackendVariant[];
@@ -58,6 +59,7 @@ export interface CreateShiftPayload {
   camera_source?: string;
   checkpoint_id?: string;
   enabled_pipelines?: string[];  // e.g. ["pipeline_barcode_date", "pipeline_anomaly"]
+  enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 export interface UpdateShiftPayload {
@@ -70,6 +72,7 @@ export interface UpdateShiftPayload {
   camera_source?: string;
   checkpoint_id?: string;
   enabled_pipelines?: string[];
+  enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 // ─── Shift variant types (backend wire format) ────────────────────────────────
@@ -147,6 +150,7 @@ export interface BackendOneOff {
   end_time: string;    // "HH:MM"
   camera_source: string;
   checkpoint_id: string;
+  enabled_checks?: string; // JSON string
   created_at: string;
 }
 
@@ -157,6 +161,7 @@ export interface CreateOneOffPayload {
   end_time: string;
   camera_source?: string;
   checkpoint_id?: string;
+  enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 export const oneOffApi = {
@@ -254,9 +259,6 @@ export const statsApi = {
 
   getCrossings(sessionId: string, limit = 10) {
     return request("GET", `/stats/session/${sessionId}/crossings?limit=${limit}`);
-  },
-  getHourlyStats(sessionId: string) {
-    return request("GET", `/stats/session/${sessionId}/hourly`);
   },
   deleteSession(sessionId: string) {
     return request("DELETE", `/stats/session/${sessionId}`);
@@ -372,8 +374,9 @@ export const backendApi = {
   // Switch active video feed
   switchView: (pipelineId: string) => pipelinesApi.setView(pipelineId),
 
-  // Video feed URL — proxied through nginx so it works from any client machine
-  videoFeedUrl: () => `/video_feed?fps=25`,
+  // Video feed URL — optional token forces the browser to reconnect the MJPEG stream.
+  videoFeedUrl: (refreshToken?: number | string) =>
+    `/video_feed?fps=30${refreshToken !== undefined ? `&t=${encodeURIComponent(String(refreshToken))}` : ""}`,
 
   // Camera config (from tracking_config) + live device probe
   listCameras: (): Promise<{ cameras: Array<{ id: string; label: string; source: number | string }> }> =>
@@ -392,11 +395,16 @@ export const backendApi = {
     pipeline_sources: Record<string, number | string>;
   }> => request("GET", "/cameras/detect"),
 
+  // Camera assignment overrides
+  getCameraAssignments: (): Promise<{ assignments: Record<string, number | string> }> =>
+    request("GET", "/cameras/assignments"),
+  setCameraAssignments: (assignments: Record<string, number | string>): Promise<{
+    assignments: Record<string, number | string>;
+    restarted: string[];
+  }> => request("POST", "/cameras/assignments", { assignments }),
+
   // Session crossings
   getCrossings: (sessionId: string, limit = 10) => statsApi.getCrossings(sessionId, limit),
-
-  // Session hourly stats
-  getHourlyStats: (sessionId: string) => statsApi.getHourlyStats(sessionId),
 
   // Session history
   getSessions: (limit = 100) => statsApi.sessions(limit),

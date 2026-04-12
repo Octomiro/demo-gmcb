@@ -6,7 +6,12 @@ services:
   db:
     image: postgres:16
     container_name: gmcb_db
-    restart: unless-stopped
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     environment:
       POSTGRES_DB:       ${DB_NAME}
       POSTGRES_USER:     ${DB_USER}
@@ -35,8 +40,19 @@ services:
       context: ./backend
       network: host
     container_name: gmcb_backend
-    restart: unless-stopped
+    restart: always
     runtime: nvidia
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -55,12 +71,13 @@ services:
         condition: service_healthy
     devices:
       - /dev/video0:/dev/video0
-      - /dev/video2:/dev/video2  # Uncomment when camera is connected
+      - /dev/video2:/dev/video2
     group_add:
       - video
     volumes:
       - ./data/liveImages:/app/liveImages
       - ./data/videos:/app/videos
+      - /home/adam/YOLO_Benchmark/ultralytics/testAnomalie-Trim.mp4:/app/videos/testAnomalie-Trim.mp4:ro
       - ./data/feedback_screenshots:/app/feedback_screenshots
     deploy:
       resources:
@@ -83,14 +100,19 @@ services:
       context: ./frontend
       network: host
     container_name: gmcb_frontend
-    restart: unless-stopped
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     dns:
       - 8.8.8.8
       - 8.8.4.4
     depends_on:
       - backend
     ports:
-      - "8094:80"
+      - "5020:80"
     deploy:
       resources:
         limits:

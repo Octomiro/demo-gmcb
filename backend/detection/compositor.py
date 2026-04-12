@@ -140,7 +140,21 @@ class CompositorMixin:
                 cv2.putText(frame, f"TOTAL: {ov_total}",
                             (w - 250, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-                # Show "Waiting for YOLO..." before first detection arrives
+                # ── Bottom-left HUD: CAM fps + YOLO fps (same style, stacked) ──
+                with self._stats_lock:
+                    _rfps = self.stats.get("reader_fps", 0)
+                if _rfps >= 28:
+                    _rfps_color = (0, 255, 0)      # green  — nominal
+                elif _rfps >= 22:
+                    _rfps_color = (0, 200, 255)    # orange — mild drop
+                elif _rfps > 0:
+                    _rfps_color = (0, 0, 255)      # red    — serious drop
+                else:
+                    _rfps_color = (100, 100, 100)
+                _rfps_text = f"CAM: {_rfps:.1f}fps" if _rfps > 0 else "CAM: --"
+                cv2.putText(frame, _rfps_text,
+                            (10, h - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _rfps_color, 1)
+
                 if ov_det_ms == 0 and len(ov_tracks) == 0:
                     cv2.putText(frame, "YOLO: warming up...",
                                 (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
@@ -149,14 +163,11 @@ class CompositorMixin:
                                 f"YOLO: {ov_det_ms:.0f}ms | ~{ov_det_fps:.0f}fps",
                                 (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
-                # Live reader FPS on the stream overlay
-                with self._stats_lock:
-                    _rfps = self.stats.get("reader_fps", 0)
-                if _rfps > 0:
-                    rfps_color = (0, 255, 0) if _rfps >= 28 else (0, 200, 255) if _rfps >= 20 else (0, 0, 255)
-                    cv2.putText(frame,
-                                f"Reader: {_rfps:.1f}fps",
-                                (10, h - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, rfps_color, 1)
+                # Full-frame red banner when camera FPS drops critically (< 22)
+                if 0 < _rfps < 22:
+                    cv2.rectangle(frame, (0, 0), (w, 36), (0, 0, 180), cv2.FILLED)
+                    cv2.putText(frame, f"!! CAMERA FPS DROP: {_rfps:.1f} fps !!",
+                                (w // 2 - 220, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
 
                 cv2.putText(frame, f"Frame: {self.frame_count}",
                             (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
