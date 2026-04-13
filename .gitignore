@@ -43,3 +43,4 @@ frontend/dist-ssr/
 # ── OS ──
 .DS_Store
 Thumbs.db
+/SYSTEM_ARCHITECTURE.md

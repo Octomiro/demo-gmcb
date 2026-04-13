@@ -3,7 +3,7 @@ import time
 import cv2
 import numpy as np
 
-from tracking_config import JPEG_QUALITY
+from tracking_config import JPEG_QUALITY, STREAM_WIDTH, STREAM_HEIGHT, CAMERA_WIDTH, CAMERA_HEIGHT
 
 # ── JPEG encoder selection ───────────────────────────────────────────────────
 # TurboJPEG (libjpeg-turbo SIMD) releases the GIL → true parallelism.
@@ -171,6 +171,15 @@ class CompositorMixin:
 
                 cv2.putText(frame, f"Frame: {self.frame_count}",
                             (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+
+                # ── Downscale for streaming (detect at full res, stream smaller) ──
+                cap_w = getattr(self, '_capture_width',  CAMERA_WIDTH)
+                cap_h = getattr(self, '_capture_height', CAMERA_HEIGHT)
+                sw = getattr(self, '_stream_width',  STREAM_WIDTH)
+                sh = getattr(self, '_stream_height', STREAM_HEIGHT)
+                if sw != cap_w or sh != cap_h:
+                    frame = cv2.resize(frame, (sw, sh),
+                                       interpolation=cv2.INTER_AREA)
 
                 # ── Encode to JPEG once (reused by all browser clients) ──
                 # TurboJPEG (libjpeg-turbo SIMD) releases GIL → parallel.

@@ -87,7 +87,7 @@ def video_feed():
     low_mode = flask_request.args.get('low', '0') == '1'
     quality = int(flask_request.args.get('quality', 40 if low_mode else 0))
     scale = float(flask_request.args.get('scale', 0.5 if low_mode else 1.0))
-    fps = int(flask_request.args.get('fps', 5 if low_mode else 25))
+    fps = int(flask_request.args.get('fps', 5 if low_mode else 30))
     fps = max(1, min(30, fps))
     scale = max(0.1, min(1.0, scale))
     quality = max(1, min(95, quality)) if quality > 0 else 0
@@ -109,13 +109,16 @@ def video_feed():
             while True:
                 st = _view_state()
                 if st is not None:
-                    # Poll for a new frame using gevent-friendly sleep
-                    # (threading.Event.wait blocks the gevent hub when threads aren't patched)
-                    deadline = time.monotonic() + sleep_interval
-                    while time.monotonic() < deadline:
-                        if st._jpeg_event.is_set():
-                            break
-                        gevent.sleep(0.005)  # yield to other greenlets
+                    # Yield frame ASAP when available; only wait up to
+                    # sleep_interval if compositor hasn't produced one yet.
+                    # (threading.Event.wait blocks the gevent hub when
+                    # threads aren't patched — use gevent.sleep polling)
+                    if not st._jpeg_event.is_set():
+                        deadline = time.monotonic() + sleep_interval
+                        while time.monotonic() < deadline:
+                            if st._jpeg_event.is_set():
+                                break
+                            gevent.sleep(0.003)  # yield to other greenlets
                     st._jpeg_event.clear()
 
                     with st._jpeg_lock:
@@ -127,7 +130,7 @@ def video_feed():
 
                     # Skip if same frame (compositor hasn't produced a new one)
                     if jpeg is not None and cur_seq == last_seq:
-                        gevent.sleep(0.005)
+                        gevent.sleep(0.003)
                         continue
                     last_seq = cur_seq
                 else:
@@ -865,15 +868,25 @@ def api_camera_assignments_set():
     _save_assignments(existing)
     _apply_assignments(existing)
 
+    # Phase 1: stop ALL affected pipelines before opening any new camera source.
+    # This prevents the case where pipeline A is started on cam_B while pipeline B
+    # still holds cam_B (V4L2 is exclusive — second open would fail).
+    stop_info = {}  # pid → was_recording
+    for pid in new_assignments:
+        st = pipelines.get(pid)
+        if st is None:
+            continue
+        stop_info[pid] = getattr(st, '_stats_active', False)
+        if st.is_running:
+            st.stop_processing()
+
+    # Phase 2: start each pipeline on its new source
     restarted = []
     for pid, new_src in new_assignments.items():
         st = pipelines.get(pid)
         if st is None:
             continue
-        was_recording = getattr(st, '_stats_active', False)
-        # Restart the pipeline on the new camera source
-        if st.is_running:
-            st.stop_processing()
+        was_recording = stop_info.get(pid, False)
         res = st.start_processing(new_src)
         if res.get("status") == "started":
             restarted.append(pid)
@@ -1002,6 +1015,11 @@ def api_switch():
     cur_cp_id = pipeline_checkpoint_ids.get(pid, "")
     if new_cp_id is None or new_cp_id == cur_cp_id:
         if new_source and state.is_running:
+            # Stop any OTHER pipeline currently holding the target camera source
+            # before switching this pipeline to it (V4L2 exclusive access).
+            for other_pid, other_st in _all_states():
+                if other_pid != pid and other_st.is_running and other_st.video_source == new_source:
+                    other_st.stop_processing()
             state.stop_processing()
             state.start_processing(new_source)
         return jsonify({

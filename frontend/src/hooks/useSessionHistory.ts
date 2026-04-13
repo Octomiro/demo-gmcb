@@ -11,6 +11,7 @@ export interface Session {
   session_ids?: string[]; // raw pipeline session ids inside this group
   started_at: string;
   ended_at: string | null;
+  end_reason?: string | null;   // 'preempted' | 'interrupted' | null (normal stop)
   checkpoint_id: string;
   checkpoint_ids?: string[]; // all checkpoints in the group (e.g. ["barcode_date","anomaly"])
   camera_source: string;

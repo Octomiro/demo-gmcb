@@ -521,8 +521,10 @@ export function CalendarPickerModal({ mode = "single", selectedRange, onClose, o
   const monthEnd = new Date(viewMonth.getFullYear(), viewMonth.getMonth() + 1, 0);
   const daysInMonth = monthEnd.getDate();
   const leadingEmpty = monthStart.getDay();
+  // In range mode allow navigating up to today's month (so user can pick today as range boundary)
+  const effectiveMaxDate = mode === "range" ? new Date(todayIso + "T00:00:00") : maxDate;
   const canPrev = (viewMonth.getFullYear() * 12 + viewMonth.getMonth()) > (minDate.getFullYear() * 12 + minDate.getMonth());
-  const canNext = (viewMonth.getFullYear() * 12 + viewMonth.getMonth()) < (maxDate.getFullYear() * 12 + maxDate.getMonth());
+  const canNext = (viewMonth.getFullYear() * 12 + viewMonth.getMonth()) < (effectiveMaxDate.getFullYear() * 12 + effectiveMaxDate.getMonth());
 
   const toIso = (year: number, month: number, day: number) => {
     const m = String(month + 1).padStart(2, "0");
@@ -585,12 +587,16 @@ export function CalendarPickerModal({ mode = "single", selectedRange, onClose, o
               const dayNum = i + 1;
               const iso = toIso(viewMonth.getFullYear(), viewMonth.getMonth(), dayNum);
               const dayData = daysByDate[iso];
-              const selectable = Boolean(dayData);
-              const inRange = selectable && isInSelectedRange(iso);
-              const isEdge = selectable && isRangeEdge(iso);
+              const hasData = Boolean(dayData);
+              // In range mode: any day up to today is a valid boundary, not just session days.
+              // In single mode: only days with session data are selectable (clicking opens details).
+              const selectable = mode === "range" ? iso <= todayIso : hasData;
+              const inRange = isInSelectedRange(iso);
+              const isEdge = isRangeEdge(iso);
+              const effectiveDayData: DayData = dayData || { date: iso, label: iso, sessions: [], paquets: 0, anomalies: 0, defauts: 0, conformite: 0 };
               return (
-                <button key={iso} onClick={() => selectable && handleDayClick(iso, dayData)} disabled={!selectable}
-                  style={{ height: 38, borderRadius: 10, border: isEdge ? "1px solid #4338ca" : selectable ? "1px solid #c7d2fe" : "1px solid #f1f5f9", background: isEdge ? "#4f46e5" : inRange ? "#eef2ff" : selectable ? "#f8fafc" : "#f8fafc", color: isEdge ? "#fff" : selectable ? "#3730a3" : "#c0c4cc", fontWeight: 700, fontSize: 12, cursor: selectable ? "pointer" : "not-allowed", transition: "all .15s" }}>
+                <button key={iso} onClick={() => selectable && handleDayClick(iso, effectiveDayData)} disabled={!selectable}
+                  style={{ height: 38, borderRadius: 10, border: isEdge ? "1px solid #4338ca" : (hasData || inRange) ? "1px solid #c7d2fe" : selectable ? "1px solid #e2e8f0" : "1px solid #f1f5f9", background: isEdge ? "#4f46e5" : inRange ? "#eef2ff" : "#f8fafc", color: isEdge ? "#fff" : hasData ? "#3730a3" : selectable ? "#9ca3af" : "#c0c4cc", fontWeight: 700, fontSize: 12, cursor: selectable ? "pointer" : "not-allowed", transition: "all .15s" }}>
                   {dayNum}
                 </button>
               );

@@ -49,8 +49,8 @@ class ReaderMixin:
                 # Setting WIDTH/HEIGHT fires VIDIOC_S_FMT which resets FPS;
                 # VIDIOC_S_PARM (FPS) must be issued after the format is final.
                 cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH,  getattr(self, '_capture_width',  CAMERA_WIDTH))
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, getattr(self, '_capture_height', CAMERA_HEIGHT))
                 cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)   # LAST: after format
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # 2 = USB double-buffer; 1 starves DMA → 15fps
 
@@ -114,8 +114,11 @@ class ReaderMixin:
                     reconnected = False
                     import platform
                     attempt = 0
+                    # Fast reconnect: try every 0.3s for first 5 attempts (cable glitch recovery),
+                    # then slow down to 1s. Minimises detection gap during USB extender drops.
                     while self.is_running and self._session_gen == session_gen:
-                        time.sleep(2.0)
+                        wait = 0.3 if attempt < 5 else 1.0
+                        time.sleep(wait)
                         if not self.is_running or self._session_gen != session_gen:
                             break
                         attempt += 1
@@ -126,8 +129,8 @@ class ReaderMixin:
                             else:
                                 new_cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
                             new_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                            new_cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                            new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                            new_cap.set(cv2.CAP_PROP_FRAME_WIDTH,  getattr(self, '_capture_width',  CAMERA_WIDTH))
+                            new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, getattr(self, '_capture_height', CAMERA_HEIGHT))
                             new_cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
                             new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                             if new_cap.isOpened():
