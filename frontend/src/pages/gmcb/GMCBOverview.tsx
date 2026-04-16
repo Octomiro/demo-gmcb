@@ -64,9 +64,13 @@ function getSessionKindLabel(session: PlannedSession): string {
 
 function isInterruptedHistorySession(session: HistorySession): boolean {
   // New rows: check dedicated end_reason field
-  if (session.end_reason === "interrupted" || session.end_reason === "preempted") return true;
+  if (session.end_reason === "interrupted" || session.end_reason === "preempted" || session.end_reason === "camera_unavailable") return true;
   // Legacy rows: reason was embedded in ended_at string
   return Boolean(session.ended_at?.startsWith("interrupted:") || session.ended_at?.startsWith("preempted:"));
+}
+
+function isCameraFailedHistorySession(session: HistorySession): boolean {
+  return session.end_reason === "camera_unavailable";
 }
 
 function historySessionMatchesLiveSession(
@@ -160,7 +164,9 @@ const GMCBOverview: React.FC = () => {
       const interruptionPct = isInterrupted
         ? Math.round((interruptedMinutes / plannedDurationMinutes) * 100)
         : 0;
-      const interruptionCause = matchingHistory?.end_reason === "interrupted"
+      const interruptionCause = matchingHistory?.end_reason === "camera_unavailable"
+        ? "caméra indisponible"
+        : matchingHistory?.end_reason === "interrupted"
         ? "arrêt système"
         : matchingHistory?.end_reason === "preempted"
         ? "shift automatique"
@@ -171,14 +177,19 @@ const GMCBOverview: React.FC = () => {
         ? `Créneau prévu : ${session.start} - ${session.end}\nArrêt réel : ${formatTunisiaTime(actualEndDate)}\nTemps coupé : ${formatDurationMinutes(interruptedMinutes)}\nCause : ${interruptionCause}`
         : "";
 
+      const cameraFailed = matchingHistory?.end_reason === "camera_unavailable";
+      const baseStatus = session.disabled ? "Désactivé" : isCompleted ? "Terminé" : isRunningNow ? "En cours" : "En attente";
+      const status = cameraFailed ? "Erreur caméra" : baseStatus;
+
       return {
         ...session,
-        status: session.disabled ? "Désactivé" : isCompleted ? "Terminé" : isRunningNow ? "En cours" : "En attente",
+        status,
         matchedHistoryId: matchingHistory?.id ?? null,
-        isInterrupted,
+        isInterrupted: isInterrupted && !cameraFailed,
         interruptionPct,
         interruptionTooltip,
         interruptedAt: formatTunisiaTime(actualEndDate),
+        cameraFailed,
       };
     });
   }, [currentMinutes, isoToday, stats.isRunning, todayHistory?.sessions, todaySessions]);
@@ -333,9 +344,9 @@ const GMCBOverview: React.FC = () => {
                             <div className="text-sm text-slate-500">{s.start} - {s.end}</div>
                           </div>
                           <div className="text-sm font-medium px-3 py-1 rounded-full" style={{
-                            background: s.status === "En cours" ? "#dbeafe" : s.status === "Désactivé" ? "#fee2e2" : "#f8fafc",
-                            color: s.status === "En cours" ? "#1d4ed8" : s.status === "Désactivé" ? "#b91c1c" : "#475569",
-                            border: `1px solid ${s.status === "En cours" ? "#bfdbfe" : s.status === "Désactivé" ? "#fecaca" : "#e2e8f0"}`,
+                            background: s.status === "En cours" ? "#dbeafe" : s.status === "Désactivé" ? "#fee2e2" : s.status === "Erreur caméra" ? "#fef2f2" : "#f8fafc",
+                            color: s.status === "En cours" ? "#1d4ed8" : s.status === "Désactivé" ? "#b91c1c" : s.status === "Erreur caméra" ? "#dc2626" : "#475569",
+                            border: `1px solid ${s.status === "En cours" ? "#bfdbfe" : s.status === "Désactivé" ? "#fecaca" : s.status === "Erreur caméra" ? "#fca5a5" : "#e2e8f0"}`,
                           }}>
                             {s.status}
                           </div>
@@ -366,40 +377,63 @@ const GMCBOverview: React.FC = () => {
                             <div>
                               <div className="font-medium flex items-center gap-2 flex-wrap">
                                 <span>{s.name}</span>
-                                {s.isInterrupted && (
+                                {s.cameraFailed && (
+                                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5" }}>Caméra indisponible</span>
+                                )}
+                                {!s.cameraFailed && s.isInterrupted && (
                                   <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74" }}>Interrompue</span>
                                 )}
                               </div>
                               <div className="text-sm text-slate-500">
                                 {s.start} - {s.end}
-                                {s.isInterrupted && (
+                                {s.cameraFailed && (
+                                  <span style={{ color: "#dc2626", fontWeight: 600 }}>{" "}• Mode non activé — vérifiez la caméra</span>
+                                )}
+                                {!s.cameraFailed && s.isInterrupted && (
                                   <span title={s.interruptionTooltip} style={{ color: "#c2410c", fontWeight: 600 }}>{" "}• {s.interruptionPct}% du temps prévu coupé</span>
                                 )}
                               </div>
-                              {s.isInterrupted && (
+                              {!s.cameraFailed && s.isInterrupted && (
                                 <div title={s.interruptionTooltip} className="text-xs mt-1" style={{ color: "#c2410c" }}>Arrêt réel à {s.interruptedAt}</div>
                               )}
                             </div>
-                            <div className="text-sm font-medium px-3 py-1 rounded-full" style={{ background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0", boxShadow: "0 8px 24px rgba(34,197,94,0.10)" }}>
-                              Terminé
+                            <div className="text-sm font-medium px-3 py-1 rounded-full" style={
+                              s.cameraFailed
+                                ? { background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5" }
+                                : { background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0", boxShadow: "0 8px 24px rgba(34,197,94,0.10)" }
+                            }>
+                              {s.cameraFailed ? "Erreur caméra" : "Terminé"}
                             </div>
                           </div>
                         ))}
                         {completedSpontaneous.map((session) => {
-                          const interrupted = isInterruptedHistorySession(session);
+                          const cameraFailed = isCameraFailedHistorySession(session);
+                          const interrupted = !cameraFailed && isInterruptedHistorySession(session);
                           return (
                             <div key={session.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
                               <div>
                                 <div className="font-medium flex items-center gap-2 flex-wrap">
                                   <span>Session non planifiée</span>
+                                  {cameraFailed && (
+                                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5" }}>Caméra indisponible</span>
+                                  )}
                                   {interrupted && (
                                     <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74" }}>Interrompue</span>
                                   )}
                                 </div>
-                                <div className="text-sm text-slate-500">{formatTunisiaTime(session.started_at)} – {formatTunisiaTime(session.ended_at)}</div>
+                                <div className="text-sm text-slate-500">
+                                  {formatTunisiaTime(session.started_at)} – {formatTunisiaTime(session.ended_at)}
+                                  {cameraFailed && (
+                                    <span style={{ color: "#dc2626", fontWeight: 600 }}>{" "}• Mode non activé — vérifiez la caméra</span>
+                                  )}
+                                </div>
                               </div>
-                              <div className="text-sm font-medium px-3 py-1 rounded-full" style={{ background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0" }}>
-                                Terminé
+                              <div className="text-sm font-medium px-3 py-1 rounded-full" style={
+                                cameraFailed
+                                  ? { background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5" }
+                                  : { background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0" }
+                              }>
+                                {cameraFailed ? "Erreur caméra" : "Terminé"}
                               </div>
                             </div>
                           );

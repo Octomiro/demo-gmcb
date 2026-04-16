@@ -56,6 +56,7 @@ class ReaderMixin:
 
             if not cap or not cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
+                self._camera_error = "camera_unavailable"
                 self.is_running = False
                 return
 

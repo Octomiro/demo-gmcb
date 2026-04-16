@@ -508,7 +508,9 @@ export function CalendarPickerModal({ mode = "single", selectedRange, onClose, o
     ? Object.fromEntries(availableDates.map((d) => [d, { date: d, label: d, sessions: [], paquets: 0, anomalies: 0, defauts: 0, conformite: 0 } as DayData]))
     : Object.fromEntries(DAYS_DATA.map((day) => [day.date, day]));
   const dates = effectiveDates;
-  const minDate = new Date(dates[0] + "T00:00:00");
+  const rangeMinDate = new Date(todayIso() + "T00:00:00");
+  rangeMinDate.setFullYear(rangeMinDate.getFullYear() - 1);
+  const minDate = mode === "range" ? rangeMinDate : new Date(dates[0] + "T00:00:00");
   const maxDate = new Date(dates[dates.length - 1] + "T00:00:00");
   const initialFocusDate = (selectedRange?.end || selectedRange?.start || dates[dates.length - 1]) as string;
   const [viewMonth, setViewMonth] = useState(new Date(initialFocusDate + "T00:00:00"));
@@ -522,7 +524,7 @@ export function CalendarPickerModal({ mode = "single", selectedRange, onClose, o
   const daysInMonth = monthEnd.getDate();
   const leadingEmpty = monthStart.getDay();
   // In range mode allow navigating up to today's month (so user can pick today as range boundary)
-  const effectiveMaxDate = mode === "range" ? new Date(todayIso + "T00:00:00") : maxDate;
+  const effectiveMaxDate = mode === "range" ? new Date(todayIso() + "T00:00:00") : maxDate;
   const canPrev = (viewMonth.getFullYear() * 12 + viewMonth.getMonth()) > (minDate.getFullYear() * 12 + minDate.getMonth());
   const canNext = (viewMonth.getFullYear() * 12 + viewMonth.getMonth()) < (effectiveMaxDate.getFullYear() * 12 + effectiveMaxDate.getMonth());
 
@@ -590,7 +592,7 @@ export function CalendarPickerModal({ mode = "single", selectedRange, onClose, o
               const hasData = Boolean(dayData);
               // In range mode: any day up to today is a valid boundary, not just session days.
               // In single mode: only days with session data are selectable (clicking opens details).
-              const selectable = mode === "range" ? iso <= todayIso : hasData;
+              const selectable = mode === "range" ? iso <= todayIso() : hasData;
               const inRange = isInSelectedRange(iso);
               const isEdge = isRangeEdge(iso);
               const effectiveDayData: DayData = dayData || { date: iso, label: iso, sessions: [], paquets: 0, anomalies: 0, defauts: 0, conformite: 0 };

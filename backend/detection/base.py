@@ -85,6 +85,9 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self.video_source = None
         self.cap = None
         self.is_running = False
+        # Last camera-open error — set by reader when camera cannot be opened.
+        # Reset at the start of every new session so stale values don't linger.
+        self._camera_error: str | None = None
         # Thread references for safe join on stop
         self._reader_thread = None
         self._detector_thread = None
@@ -326,6 +329,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self._nok_no_date = 0
         self._nok_anomaly = 0
         self._last_sec_future = None
+        self._camera_error = None
 
     # ─────────────────────────────────────────
     # PROOF IMAGE SAVING

@@ -63,13 +63,33 @@ CREATE TABLE IF NOT EXISTS shift_variants (
     start_date  TEXT NOT NULL,
     end_date    TEXT NOT NULL,
     days_of_week TEXT NOT NULL,      -- JSON array e.g. '["mon"]'
+    enabled_checks TEXT,             -- optional JSON override e.g. '{"barcode":true,"date":false,"anomaly":true}'
     created_at  TEXT NOT NULL
 );
+-- Migration: add enabled_checks if the table already exists without it
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name='shift_variants' AND column_name='enabled_checks'
+  ) THEN
+    ALTER TABLE shift_variants ADD COLUMN enabled_checks TEXT;
+  END IF;
+END $$;
 
 -- one_off sessions are stored in the shifts table with type='one_off'
 CREATE INDEX IF NOT EXISTS idx_shifts_type ON shifts (type);
 CREATE INDEX IF NOT EXISTS idx_shift_variants_shift_id ON shift_variants (shift_id);
-
+-- ── Session check-change log ────────────────────────────────
+-- Tracks every live toggle of enabled_checks during a session so future
+-- reports can distinguish "no defect" from "check was off".
+CREATE TABLE IF NOT EXISTS session_check_changes (
+    id          SERIAL PRIMARY KEY,
+    group_id    TEXT NOT NULL,               -- matches sessions.group_id
+    changed_at  TEXT NOT NULL,               -- ISO timestamp of the toggle
+    old_checks  TEXT NOT NULL,               -- JSON before change
+    new_checks  TEXT NOT NULL                -- JSON after change
+);
+CREATE INDEX IF NOT EXISTS idx_scc_group ON session_check_changes (group_id);
 -- ── Auth users  ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS auth_users (
     email       TEXT PRIMARY KEY,

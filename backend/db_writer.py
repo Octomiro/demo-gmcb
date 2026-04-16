@@ -180,6 +180,45 @@ class DBWriter:
             if self._current_session_id == session_id:
                 self._current_session_id = None
 
+    def log_check_change(self, group_id, old_checks, new_checks):
+        """Insert a row into session_check_changes so reports know exactly
+        when each mode was active."""
+        if not self._available or not group_id:
+            return
+        conn = self._get_pg_conn()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO session_check_changes (group_id, changed_at, old_checks, new_checks) "
+                        "VALUES (%s, %s, %s, %s)",
+                        (group_id, _ts(), json.dumps(old_checks), json.dumps(new_checks)),
+                    )
+                conn.commit()
+            except Exception as e:
+                print(f"[DBWriter] log_check_change error: {e}")
+            finally:
+                self._release_pg_conn(conn)
+
+    def update_session_checks(self, group_id, new_checks):
+        """Update enabled_checks on all session rows sharing a group_id."""
+        if not self._available or not group_id:
+            return
+        checks_json = json.dumps(new_checks)
+        conn = self._get_pg_conn()
+        if conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE sessions SET enabled_checks = %s WHERE group_id = %s AND ended_at IS NULL",
+                        (checks_json, group_id),
+                    )
+                conn.commit()
+            except Exception as e:
+                print(f"[DBWriter] update_session_checks error: {e}")
+            finally:
+                self._release_pg_conn(conn)
+
     def get_session_kpis(self, session_id):
         if not self._available or not session_id:
             return {}
@@ -197,7 +236,7 @@ class DBWriter:
         finally:
             self._release_pg_conn(conn)
 
-    def list_sessions(self, limit=50):
+    def _fetch_session_rows(self, where_sql="", params=(), limit=None):
         if not self._available:
             return []
         conn = self._get_pg_conn()
@@ -205,18 +244,36 @@ class DBWriter:
             return []
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
+                query = (
                     "SELECT id, group_id, shift_id, started_at, ended_at, end_reason, checkpoint_id, camera_source, "
                     "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly, enabled_checks "
-                    "FROM sessions ORDER BY started_at DESC LIMIT %s",
-                    (limit,),
+                    "FROM sessions "
                 )
+                query_params = list(params)
+                if where_sql:
+                    query += f"WHERE {where_sql} "
+                query += "ORDER BY started_at DESC"
+                if limit is not None:
+                    query += " LIMIT %s"
+                    query_params.append(limit)
+                cur.execute(query, tuple(query_params))
                 return [dict(r) for r in cur.fetchall()]
         except Exception as e:
-            print(f"[DBWriter] list_sessions error: {e}")
+            print(f"[DBWriter] _fetch_session_rows error: {e}")
             return []
         finally:
             self._release_pg_conn(conn)
+
+    def list_sessions(self, limit=50):
+        return self._fetch_session_rows(limit=limit)
+
+    def list_sessions_between(self, start_ts, end_ts):
+        if not start_ts or not end_ts:
+            return []
+        return self._fetch_session_rows(
+            where_sql="started_at >= %s AND started_at <= %s",
+            params=(start_ts, end_ts),
+        )
 
     def list_crossings(self, session_id, limit=5000):
         if not self._available or not session_id:
@@ -238,7 +295,7 @@ class DBWriter:
         finally:
             self._release_pg_conn(conn)
 
-    def list_grouped_sessions(self, limit=50):
+    def _group_session_rows(self, rows, limit=None):
         """Return sessions merged by group_id.
 
         Sessions that share a group_id (started by the same toggleRecording call)
@@ -251,7 +308,6 @@ class DBWriter:
         - NOK breakdowns are additive: each pipeline detects different defects
           (barcode_date → nobarcode/nodate, anomaly → anomaly).
         """
-        rows = self.list_sessions(limit=limit * 4)  # fetch more to cover all pipelines per group
         from collections import OrderedDict
         groups: OrderedDict = OrderedDict()
         # Checkpoint modes that count physical packets (authoritative for total/ok)
@@ -310,7 +366,15 @@ class DBWriter:
                 cur_p = _reason_priority.get(g.get("end_reason") or "", 0)
                 if new_p > cur_p:
                     g["end_reason"] = r.get("end_reason")
-        return list(groups.values())[:limit]
+        grouped = list(groups.values())
+        return grouped[:limit] if limit is not None else grouped
+
+    def list_grouped_sessions(self, limit=50):
+        rows = self.list_sessions(limit=limit * 4)  # fetch more to cover all pipelines per group
+        return self._group_session_rows(rows, limit=limit)
+
+    def list_grouped_sessions_between(self, start_ts, end_ts):
+        return self._group_session_rows(self.list_sessions_between(start_ts, end_ts))
 
     def list_crossings_for_group(self, group_id, limit=5000):
         """Return crossings across all sessions in a group."""
@@ -521,7 +585,7 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id, shift_id, kind, active, start_time, end_time, "
-                    "start_date, end_date, days_of_week, created_at "
+                    "start_date, end_date, days_of_week, enabled_checks, created_at "
                     "FROM shift_variants ORDER BY created_at"
                 )
                 return [dict(r) for r in cur.fetchall()]
@@ -542,7 +606,7 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id, shift_id, kind, active, start_time, end_time, "
-                    "start_date, end_date, days_of_week, created_at "
+                    "start_date, end_date, days_of_week, enabled_checks, created_at "
                     "FROM shift_variants WHERE shift_id = %s ORDER BY created_at",
                     (shift_id,),
                 )
@@ -706,7 +770,7 @@ class DBWriter:
             variant["id"], variant["shift_id"], variant["kind"],
             variant.get("active"), variant.get("start_time"), variant.get("end_time"),
             variant["start_date"], variant["end_date"],
-            variant["days_of_week"], variant["created_at"],
+            variant["days_of_week"], variant.get("enabled_checks"), variant["created_at"],
         )
         conn = self._get_pg_conn()
         if not conn:
@@ -715,7 +779,7 @@ class DBWriter:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO shift_variants (id, shift_id, kind, active, start_time, end_time, "
-                    "start_date, end_date, days_of_week, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "start_date, end_date, days_of_week, enabled_checks, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
             conn.commit()
@@ -730,7 +794,7 @@ class DBWriter:
         """Update specific fields of a shift_variant."""
         if not self._available or not variant_id or not fields:
             return False
-        allowed = {"kind", "active", "start_time", "end_time", "start_date", "end_date", "days_of_week"}
+        allowed = {"kind", "active", "start_time", "end_time", "start_date", "end_date", "days_of_week", "enabled_checks"}
         cols = {k: v for k, v in fields.items() if k in allowed}
         if not cols:
             return False

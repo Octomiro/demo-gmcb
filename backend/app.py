@@ -3,6 +3,7 @@ monkey.patch_all(thread=False, queue=False, subprocess=False, signal=False, os=F
 import gevent
 
 import atexit
+import io
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ from scheduler import (
     cleanup_old_proof_images,
 )
 from apscheduler.triggers.cron import CronTrigger
+from reporting import build_report_summary, generate_report_pdf
 
 from auth import auth_bp
 from feedback import feedback_bp, run_screenshot_cleanup as _feedback_screenshot_cleanup
@@ -206,6 +208,27 @@ def api_start():
             source = int(source)
         st.set_enabled_checks(enabled_checks)
         results[pid] = st.start_processing(source)
+
+    # Wait briefly for reader threads to attempt camera open (camera not plugged
+    # in fails within milliseconds; 0.7 s is a comfortable buffer).
+    gevent.sleep(0.7)
+    camera_errors = {
+        pid: st._camera_error
+        for pipe_cfg in PIPELINES
+        if (pid := pipe_cfg["id"])
+        and (st := pipelines.get(pid)) is not None
+        and isinstance(results.get(pid), dict)
+        and results[pid].get("status") == "started"
+        and not st.is_running
+        and getattr(st, "_camera_error", None)
+    }
+    if camera_errors:
+        return jsonify({
+            "error": "camera_unavailable",
+            "message": "Impossible d'ouvrir la caméra. Vérifiez qu'elle est branchée et réessayez.",
+            "pipelines": camera_errors,
+        }), 503
+
     return jsonify({"status": "started", "pipelines": results})
 
 
@@ -427,6 +450,34 @@ def api_session_start():
                                enabled_checks=enabled_checks)
         pipeline_results[pid] = "started"
 
+    # Brief wait for reader threads — detect camera failures before returning.
+    gevent.sleep(0.7)
+    camera_errors = {}
+    for pipe_cfg in PIPELINES:
+        pid = pipe_cfg["id"]
+        st = pipelines.get(pid)
+        if st is None or pipeline_results.get(pid) != "started":
+            continue
+        if not st.is_running and getattr(st, "_camera_error", None):
+            camera_errors[pid] = st._camera_error
+    if camera_errors:
+        # Roll back: close the session records and clear the guard so the
+        # scheduler (and next manual attempt) can try again cleanly.
+        for pid, st in _all_states():
+            if getattr(st, "_stats_active", False):
+                st.set_stats_recording(False, end_reason="camera_unavailable")
+            if st.is_running:
+                st.stop_processing()
+        with _session_lock:
+            pipeline_manager._active_session_source = None
+            pipeline_manager._active_session_group = None
+            pipeline_manager._active_session_shift_id = None
+        return jsonify({
+            "error": "camera_unavailable",
+            "message": "Impossible d'ouvrir la caméra. Vérifiez qu'elle est branchée et réessayez.",
+            "pipelines": camera_errors,
+        }), 503
+
     return jsonify({
         "status": "started",
         "group_id": group_id,
@@ -461,12 +512,19 @@ def api_session_stop():
 
 @app.route('/api/session/status')
 def api_session_status():
-    from scheduler import _preemption_lock, _preemption_event
+    from scheduler import _preemption_lock, _preemption_event, _camera_failure_lock, _camera_failure_event
     import scheduler as _sched_mod
 
     any_running = any(st.is_running for _, st in _all_states())
     any_recording = any(getattr(st, '_stats_active', False) for _, st in _all_states())
     guard_stale = pipeline_manager._active_session_source is not None and not any_running and not any_recording
+
+    # Current enabled checks from first running pipeline
+    current_checks = None
+    for _, st in _all_states():
+        if st.is_running:
+            current_checks = dict(getattr(st, '_enabled_checks', {"barcode": True, "date": True, "anomaly": True}))
+            break
 
     # Pop preemption event (consumed once by frontend)
     preemption = None
@@ -474,6 +532,13 @@ def api_session_status():
         if _sched_mod._preemption_event is not None:
             preemption = _sched_mod._preemption_event
             _sched_mod._preemption_event = None
+
+    # Pop camera-failure event (consumed once by frontend)
+    camera_failure = None
+    with _camera_failure_lock:
+        if _sched_mod._camera_failure_event is not None:
+            camera_failure = _sched_mod._camera_failure_event
+            _sched_mod._camera_failure_event = None
 
     return jsonify({
         "active": pipeline_manager._active_session_source is not None,
@@ -484,6 +549,8 @@ def api_session_status():
         "any_recording": any_recording,
         "guard_stale": guard_stale,
         "preemption": preemption,
+        "camera_failure": camera_failure,
+        "enabled_checks": current_checks,
     })
 
 
@@ -496,6 +563,84 @@ def api_session_reset_guard():
         pipeline_manager._active_session_shift_id = None
     print(f"[SESSION] Guard manually reset (was: {prev})")
     return jsonify({"reset": True, "previous_source": prev})
+
+
+@app.route('/api/session/checks', methods=['POST'])
+def api_session_update_checks():
+    """Update enabled_checks on a running session without stopping it.
+    Logs the change for future reporting."""
+    with _session_lock:
+        if pipeline_manager._active_session_source is None:
+            return jsonify({"error": "no active session"}), 409
+        group_id = pipeline_manager._active_session_group
+
+    data = request.get_json(force=True, silent=True) or {}
+    raw = data.get("enabled_checks") or {}
+    new_checks = {
+        "barcode": bool(raw.get("barcode", True)),
+        "date":    bool(raw.get("date",    True)),
+        "anomaly": bool(raw.get("anomaly", True)),
+    }
+
+    # Snapshot old checks from the first running pipeline
+    old_checks = {"barcode": True, "date": True, "anomaly": True}
+    for _, st in _all_states():
+        if st.is_running:
+            old_checks = dict(getattr(st, '_enabled_checks', old_checks))
+            break
+
+    # Push new checks into every running pipeline's TrackingState
+    for _, st in _all_states():
+        if st.is_running:
+            st.set_enabled_checks(new_checks)
+
+    # When anomaly check changes, actually start/stop the anomaly pipeline
+    anomaly_was_on = old_checks.get("anomaly", True)
+    anomaly_now_on = new_checks["anomaly"]
+    if anomaly_was_on != anomaly_now_on:
+        st_anomaly = pipelines.get("pipeline_anomaly")
+        if st_anomaly is not None:
+            if not anomaly_now_on:
+                # OFF → fully stop the anomaly pipeline
+                if getattr(st_anomaly, "_stats_active", False):
+                    st_anomaly.set_stats_recording(False, end_reason="check_disabled")
+                if st_anomaly.is_running:
+                    st_anomaly.stop_processing()
+            else:
+                # ON → start the anomaly pipeline and re-attach to current session
+                pipe_cfg_a = next((p for p in PIPELINES if p["id"] == "pipeline_anomaly"), None)
+                cam_src_a = pipe_cfg_a["camera_source"] if pipe_cfg_a else 2
+                if not st_anomaly.is_running:
+                    st_anomaly.set_enabled_checks(new_checks)
+                    st_anomaly.start_processing(cam_src_a)
+                    gevent.sleep(0.7)
+                    if not st_anomaly.is_running and getattr(st_anomaly, "_camera_error", None):
+                        # Rollback the check change — camera not available
+                        new_checks["anomaly"] = False
+                        for _, st2 in _all_states():
+                            if st2.is_running:
+                                st2.set_enabled_checks(new_checks)
+                        if db_writer:
+                            db_writer.update_session_checks(group_id, new_checks)
+                        return jsonify({
+                            "error": "camera_unavailable",
+                            "message": "Impossible d'activer la détection anomalie. Vérifiez que la caméra est branchée.",
+                        }), 503
+                if not getattr(st_anomaly, "_stats_active", False):
+                    st_anomaly.set_stats_recording(True, group_id=group_id)
+
+    # Persist: update the live session rows + insert audit log
+    if db_writer:
+        db_writer.update_session_checks(group_id, new_checks)
+        db_writer.log_check_change(group_id, old_checks, new_checks)
+
+    print(f"[SESSION] Live checks updated: {old_checks} → {new_checks}")
+    return jsonify({
+        "status": "updated",
+        "group_id": group_id,
+        "old_checks": old_checks,
+        "new_checks": new_checks,
+    })
 
 
 # ── Scheduled auto-stop ──────────────────────────────────────────────────────
@@ -629,6 +774,68 @@ def api_delete_stats_session(session_id):
             except Exception as e:
                 print(f"[DELETE] Could not remove proof folder {folder}: {e}")
     return jsonify({"deleted": session_id, "session_ids": deleted_ids})
+
+
+# ==========================
+# REPORTS
+# ==========================
+
+def _load_report_summary_or_error():
+    if db_writer is None:
+        return None, (jsonify({"error": "database not available"}), 503)
+    if db_writer.health().get("db") != "ok":
+        return None, (jsonify({"error": "database not available"}), 503)
+
+    start_date = (request.args.get("start_date") or "").strip()
+    end_date = (request.args.get("end_date") or "").strip()
+    if not start_date or not end_date:
+        return None, (jsonify({"error": "start_date and end_date are required"}), 400)
+
+    try:
+        summary = build_report_summary(db_writer, start_date, end_date)
+    except ValueError as exc:
+        return None, (jsonify({"error": str(exc)}), 400)
+    except Exception as exc:
+        print(f"[REPORT] summary error: {exc}")
+        return None, (jsonify({"error": "report_generation_failed"}), 500)
+
+    return summary, None
+
+
+@app.route('/api/reports/summary')
+def api_reports_summary():
+    summary, error_response = _load_report_summary_or_error()
+    if error_response is not None:
+        return error_response
+    return jsonify(summary)
+
+
+@app.route('/api/reports/pdf')
+def api_reports_pdf():
+    summary, error_response = _load_report_summary_or_error()
+    if error_response is not None:
+        return error_response
+
+    try:
+        pdf_bytes = generate_report_pdf(summary)
+    except Exception as exc:
+        print(f"[REPORT] pdf error: {exc}")
+        return jsonify({"error": "pdf_generation_failed"}), 500
+
+    start_date = summary["start_date"]
+    end_date = summary["end_date"]
+    filename = (
+        f"rapport_gmcb_{start_date}.pdf"
+        if start_date == end_date
+        else f"rapport_gmcb_{start_date}_{end_date}.pdf"
+    )
+    return send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename,
+        max_age=0,
+    )
 
 
 # ==========================
@@ -809,7 +1016,28 @@ def api_checkpoints():
 
 @app.route('/api/cameras')
 def api_cameras():
-    return jsonify({"cameras": CAMERAS})
+    """Return configured cameras with live availability status.
+
+    For each camera the response includes:
+      available: bool  — whether /dev/videoN currently exists on the host
+      missing:   bool  — inverse, convenience flag for frontend alerts
+    """
+    import glob as _glob
+    existing_devices = set(_glob.glob("/dev/video*"))
+    cameras_with_status = []
+    for cam in CAMERAS:
+        src = cam.get("source")
+        dev_path = f"/dev/video{src}" if isinstance(src, int) else str(src)
+        available = dev_path in existing_devices
+        cameras_with_status.append({**cam, "available": available, "missing": not available})
+
+    all_available = all(c["available"] for c in cameras_with_status)
+    missing_cameras = [c["id"] for c in cameras_with_status if c["missing"]]
+    return jsonify({
+        "cameras": cameras_with_status,
+        "all_available": all_available,
+        "missing_cameras": missing_cameras,
+    })
 
 
 # ── Camera assignment override helpers ───────────────────────────────────────
@@ -1081,13 +1309,23 @@ def api_pipeline_view(pipeline_id):
 
 @app.route('/api/pipelines/<pipeline_id>/stats')
 def api_pipeline_stats(pipeline_id):
+    import glob as _g
+    def _cam_available(pid):
+        cfg = next((p for p in PIPELINES if p["id"] == pid), {})
+        src = cfg.get("camera_source")
+        if src is None:
+            return True
+        dev = f"/dev/video{src}" if isinstance(src, int) else str(src)
+        return dev in set(_g.glob("/dev/video*"))
+
     st = pipelines.get(pipeline_id)
     if st is None:
         return jsonify({"pipeline_id": pipeline_id, "is_running": False, "stats_active": False,
                         "total_packets": 0, "packages_ok": 0, "packages_nok": 0,
                         "nok_no_barcode": 0, "nok_no_date": 0, "nok_anomaly": 0,
                         "session_id": None, "checkpoint_label": "",
-                        "fifo_queue": [], "perf": {"video_fps": 0, "det_fps": 0, "inference_ms": 0}})
+                        "fifo_queue": [], "perf": {"video_fps": 0, "det_fps": 0, "inference_ms": 0},
+                        "camera_available": _cam_available(pipeline_id)})
     cp_id = pipeline_checkpoint_ids.get(pipeline_id, "")
     with st._stats_lock:
         s = dict(st.stats)
@@ -1117,6 +1355,7 @@ def api_pipeline_stats(pipeline_id):
     else:
         s["db_connected"] = False
     s["enabled_checks"] = getattr(st, '_enabled_checks', {"barcode": True, "date": True, "anomaly": True})
+    s["camera_available"] = _cam_available(pipeline_id)
     return jsonify(s)
 
 
@@ -1478,6 +1717,7 @@ def api_variants_create(shift_id):
         "start_date": start_date,
         "end_date": end_date,
         "days_of_week": json.dumps([d.lower() for d in days_of_week]),
+        "enabled_checks": json.dumps(data["enabled_checks"]) if isinstance(data.get("enabled_checks"), dict) else None,
         "created_at": datetime.now(_TUNIS_TZ).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%S'),
     }
     result = db_writer.insert_variant(variant)
@@ -1503,6 +1743,9 @@ def api_variants_update(shift_id, variant_id):
             fields[f] = data[f]
     if "days_of_week" in data:
         fields["days_of_week"] = json.dumps([d.lower() for d in data["days_of_week"]])
+    if "enabled_checks" in data:
+        ec = data["enabled_checks"]
+        fields["enabled_checks"] = json.dumps(ec) if isinstance(ec, dict) else None
     if "start_date" in fields and "end_date" in fields:
         if not _date_order_ok(fields["start_date"], fields["end_date"]):
             return jsonify({"error": "La date de début doit être avant la date de fin"}), 400

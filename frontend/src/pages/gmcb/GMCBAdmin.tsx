@@ -42,7 +42,7 @@ import { HistDayModal } from "./GMCBHistorique";
 interface RuleActionModalState {
   open: boolean; mode: string; ruleId: string | null;
   variantId: string | null;
-  draft: { start: string; end: string; startDate: string; endDate: string; weekdays: string[] };
+  draft: { start: string; end: string; startDate: string; endDate: string; weekdays: string[]; enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean } };
 }
 
 function timeToMinutes(value: string): number {
@@ -80,13 +80,14 @@ const GMCBAdmin = () => {
     deleteVariant,
     deleteVariantRaw,
     refreshAfterBatch,
+    reload: reloadShifts,
   } = useShifts();
 
   // One-off sessions — persisted to backend
   const { oneOffSessions, addOneOff, updateOneOff, removeOneOff } = useOneOffSessions();
   const [editingOneOffId, setEditingOneOffId] = useState<string | null>(null);
   const [oneOffEditDraft, setOneOffEditDraft] = useState<{ start: string; end: string; date: string }>({ start: "", end: "", date: "" });
-  const [editingRuleForDate, setEditingRuleForDate] = useState<{ ruleId: string; date: string; start: string; end: string; variantId?: string } | null>(null);
+  const [editingRuleForDate, setEditingRuleForDate] = useState<{ ruleId: string; date: string; start: string; end: string; variantId?: string; enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean } } | null>(null);
   const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
   const [ruleDraft, setRuleDraft] = useState(() => getDefaultRuleDraft(today));
   const [singleDraft, setSingleDraft] = useState(() => getDefaultSingleDraft(selectedDate));
@@ -174,19 +175,54 @@ const GMCBAdmin = () => {
     return () => clearInterval(intervalId);
   }, []);
 
-  // Poll session guard state every 30s to detect stuck guard
+  // Renumber shifts by start time whenever the list changes
+  const prevShiftCount = useRef(recurringRules.length);
+  useEffect(() => {
+    if (recurringRules.length === 0) { prevShiftCount.current = 0; return; }
+    // Only renumber when: count changed (create/delete) OR any "Shift N" name is out of order
+    const sorted = [...recurringRules].sort((a, b) => a.start.localeCompare(b.start));
+    const needsRenumber = sorted.some((r, i) => /^Shift\s+\d+$/.test(r.name) && r.name !== `Shift ${i + 1}`);
+    if (needsRenumber || recurringRules.length !== prevShiftCount.current) {
+      prevShiftCount.current = recurringRules.length;
+      renumberShiftsByTime(recurringRules);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recurringRules]);
+
+  // Poll session guard state every 30s to detect stuck guard and camera failures
   useEffect(() => {
     let cancelled = false;
     async function checkGuard() {
       try {
         const s = await backendApi.sessionStatus();
-        if (!cancelled) setGuardStale(Boolean(s.guard_stale));
+        if (cancelled) return;
+        setGuardStale(Boolean(s.guard_stale));
+        if (s.camera_failure) {
+          toast.error(
+            `Caméra inaccessible — le shift "${s.camera_failure.shift_label}" n'a pas pu démarrer. Vérifiez que la caméra est branchée.`,
+            { duration: 10000 },
+          );
+        }
       } catch { /* backend unreachable, ignore */ }
     }
     checkGuard();
     const id = setInterval(checkGuard, 30_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
+
+  // Auto-disable anomaly when confirm modal opens if camera unavailable
+  useEffect(() => {
+    if (confirmSessionOpen && stats.p1?.camera_available === false) {
+      setEnabledChecks(prev => ({ ...prev, anomaly: false }));
+    }
+  }, [confirmSessionOpen, stats.p1?.camera_available]);
+
+  // Auto-disable anomaly when confirm modal opens if camera unavailable
+  useEffect(() => {
+    if (confirmSessionOpen && stats.p1?.camera_available === false) {
+      setEnabledChecks(prev => ({ ...prev, anomaly: false }));
+    }
+  }, [confirmSessionOpen, stats.p1?.camera_available]);
 
   async function startSession() {
     setSessionLoading(true);
@@ -195,12 +231,17 @@ const GMCBAdmin = () => {
         toast.error("Activez au moins un contrôle avant de démarrer.");
         return;
       }
-      // Derive which physical pipelines to start from enabled checks
-      const enabledPipelines: string[] = [];
-      if (enabledChecks.barcode || enabledChecks.date) enabledPipelines.push("pipeline_barcode_date");
-      if (enabledChecks.anomaly) enabledPipelines.push("pipeline_anomaly");
-      await backendApi.startAll(undefined, enabledPipelines, enabledChecks);
-      await backendApi.toggleRecording();
+      try {
+        await backendApi.sessionStart(enabledChecks);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("camera_unavailable")) {
+          toast.error("Caméra inaccessible — vérifiez qu'elle est bien branchée et réessayez.", { duration: 8000 });
+        } else {
+          toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
+        }
+        return;
+      }
     } catch {
       toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
     } finally {
@@ -211,8 +252,7 @@ const GMCBAdmin = () => {
   async function stopSession() {
     setSessionLoading(true);
     try {
-      await backendApi.toggleRecording();
-      await backendApi.stopAll();
+      await backendApi.sessionStop();
     } catch {
       toast.error("Impossible d'arrêter la session. Réessayez dans un instant.");
     } finally {
@@ -247,9 +287,24 @@ const GMCBAdmin = () => {
 
   function openNewRecurringModal() {
     setEditingRuleId(null);
-    const nextName = `Shift ${recurringRules.length + 1}`;
-    setRuleDraft({ ...getDefaultRuleDraft(today), name: nextName });
+    // Name will be assigned after creation based on start-time rank
+    setRuleDraft({ ...getDefaultRuleDraft(today), name: "" });
     setRecurringModalOpen(true);
+  }
+
+  /** Rename all recurring shifts so that the one with the earliest start time
+   * is "Shift 1", the next is "Shift 2", etc. Only renames shifts whose name
+   * matches the "Shift N" pattern. Fires silent background updates. */
+  async function renumberShiftsByTime(allShifts: RecurringRule[]) {
+    const sorted = [...allShifts].sort((a, b) => a.start.localeCompare(b.start));
+    const updates: Promise<any>[] = [];
+    sorted.forEach((shift, idx) => {
+      const expected = `Shift ${idx + 1}`;
+      if (shift.name !== expected) {
+        updates.push(updateShift(shift.id, { name: expected }).catch(() => { /* silent */ }));
+      }
+    });
+    if (updates.length > 0) await Promise.all(updates);
   }
 
   function openEditRecurringModal(rule: RecurringRule) {
@@ -264,16 +319,16 @@ const GMCBAdmin = () => {
   function openRuleActionModal(rule: RecurringRule, mode: string, preset: Record<string, any> = {}) {
     setRuleActionModal({
       open: true, mode, ruleId: rule.id, variantId: preset.variantId || null,
-      draft: { start: preset.start || rule.start, end: preset.end || rule.end, startDate: preset.startDate || selectedDate || today, endDate: preset.endDate || selectedDate || addDays(today, 30), weekdays: sortWeekdays(preset.weekdays || rule.weekdays) },
+      draft: { start: preset.start || rule.start, end: preset.end || rule.end, startDate: preset.startDate || rule.startDate, endDate: preset.endDate || rule.endDate, weekdays: sortWeekdays(preset.weekdays || rule.weekdays), enabledChecks: preset.enabledChecks ?? rule.enabledChecks },
     });
   }
 
-  function closeRuleActionModal() { setRuleActionModal({ open: false, mode: "timing", ruleId: null, variantId: null, draft: getDefaultRuleActionDraft(today) }); }
+  function closeRuleActionModal() { setRuleActionModal({ open: false, mode: "timing", ruleId: null, variantId: null, draft: { ...getDefaultRuleActionDraft(today), enabledChecks: undefined } }); }
 
   function openExistingVariantModal(rule: RecurringRule, variant: any) {
     setRuleActionModal({
       open: true, mode: variant.kind === "timing" ? "timing" : "disable", ruleId: rule.id, variantId: variant.id,
-      draft: { start: variant.start || rule.start, end: variant.end || rule.end, startDate: variant.startDate, endDate: variant.endDate, weekdays: sortWeekdays(variant.weekdays) },
+      draft: { start: variant.start || rule.start, end: variant.end || rule.end, startDate: variant.startDate, endDate: variant.endDate, weekdays: sortWeekdays(variant.weekdays), enabledChecks: variant.enabledChecks ?? rule.enabledChecks },
     });
   }
 
@@ -282,7 +337,7 @@ const GMCBAdmin = () => {
   }
 
   async function addRecurringRule() {
-    if (!ruleDraft.name || !ruleDraft.start || !ruleDraft.end || ruleDraft.weekdays.length === 0) return;
+    if (!ruleDraft.start || !ruleDraft.end || ruleDraft.weekdays.length === 0) return;
     if (ruleDraft.start >= ruleDraft.end) {
       toast.error("L'heure de début doit être avant l'heure de fin");
       return;
@@ -303,7 +358,7 @@ const GMCBAdmin = () => {
       try {
         const ec = ruleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true };
         const ep = [...((ec.barcode || ec.date) ? ["pipeline_barcode_date"] : []), ...(ec.anomaly ? ["pipeline_anomaly"] : [])];
-        const updated = await updateShift(editingRuleId, {
+        await updateShift(editingRuleId, {
           name: ruleDraft.name,
           start: ruleDraft.start,
           end: ruleDraft.end,
@@ -313,9 +368,11 @@ const GMCBAdmin = () => {
           enabledPipelines: ep,
           enabledChecks: ec,
         });
-        // Preserve local variants, trimming days no longer in the rule
-        const allowed = new Set(updated.weekdays);
-        // variants are local-only; callers keep their own state
+        // Renumber all shifts after a possible start-time change
+        const updatedList = recurringRules.map((r) =>
+          r.id === editingRuleId ? { ...r, start: ruleDraft.start } : r
+        );
+        await renumberShiftsByTime(updatedList);
       } catch {
         toast.error("Impossible de modifier ce shift. Réessayez.");
         return;
@@ -325,8 +382,14 @@ const GMCBAdmin = () => {
     try {
       const ec = ruleDraft.enabledChecks ?? { barcode: true, date: true, anomaly: true };
       const ep = [...((ec.barcode || ec.date) ? ["pipeline_barcode_date"] : []), ...(ec.anomaly ? ["pipeline_anomaly"] : [])];
+      // Determine what rank this new shift will be by start time
+      const allWithNew = [...recurringRules, { start: ruleDraft.start } as RecurringRule]
+        .sort((a, b) => a.start.localeCompare(b.start));
+      const newRank = allWithNew.findIndex((r) => r.start === ruleDraft.start && !recurringRules.some((e) => e.start === r.start && e === r)) + 1 ||
+        allWithNew.map((r) => r.start).lastIndexOf(ruleDraft.start) + 1;
+      const assignedName = `Shift ${newRank}`;
       await createShift({
-        name: ruleDraft.name,
+        name: assignedName,
         start: ruleDraft.start,
         end: ruleDraft.end,
         startDate: ruleDraft.startDate,
@@ -335,6 +398,10 @@ const GMCBAdmin = () => {
         enabledPipelines: ep,
         enabledChecks: ec,
       });
+      // Reload to get the freshly created shift in the list, then renumber all
+      await reloadShifts();
+      // recurringRules is stale here (React batching) — renumber will run via
+      // the useEffect below that watches recurringRules length changes.
     } catch (err: any) {
       const raw = err?.message || "";
       // Extract backend JSON error from thrown message like '...409: {"error":"..."}'
@@ -495,12 +562,14 @@ const GMCBAdmin = () => {
     const session = selectedSessions.find((s) => s.source === "rule" && s.sourceId === ruleId);
     if (!rule || !session) return;
     const existing = (rule.variants || []).find((v) => isSingleDateTimingVariant(v, selectedDate, wk));
+    const defaultChecks = rule.enabledChecks ?? { barcode: true, date: true, anomaly: true };
     setEditingRuleForDate({
       ruleId,
       date: selectedDate,
       start: existing ? (existing.start || session.start) : session.start,
       end: existing ? (existing.end || session.end) : session.end,
       variantId: existing?.id,
+      enabledChecks: existing?.enabledChecks ?? defaultChecks,
     });
   }
 
@@ -513,26 +582,37 @@ const GMCBAdmin = () => {
     const rule = recurringRules.find((r) => r.id === editingRuleForDate.ruleId);
     if (!rule) return;
     const wk = weekdayKeyFromIso(editingRuleForDate.date);
-    // Zombie check: if timing matches parent exactly, discard/delete
-    if (editingRuleForDate.start === rule.start && editingRuleForDate.end === rule.end) {
+    const parentChecks = rule.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+    const ec = editingRuleForDate.enabledChecks;
+    const checksMatchParent = ec.barcode === parentChecks.barcode && ec.date === parentChecks.date && ec.anomaly === parentChecks.anomaly;
+    // Zombie check: timing AND checks match parent exactly → nothing to store
+    if (editingRuleForDate.start === rule.start && editingRuleForDate.end === rule.end && checksMatchParent) {
       if (editingRuleForDate.variantId) {
         await deleteVariant(rule.id, editingRuleForDate.variantId);
-        toast.success("Horaires réinitialisés aux horaires d'origine");
+        toast.success("Modifications réinitialisées aux valeurs d'origine.");
       }
       setEditingRuleForDate(null);
       return;
     }
     try {
-      const payload = { kind: "timing" as const, start: editingRuleForDate.start, end: editingRuleForDate.end, startDate: editingRuleForDate.date, endDate: editingRuleForDate.date, weekdays: [wk] };
+      const payload = {
+        kind: "timing" as const,
+        start: editingRuleForDate.start,
+        end: editingRuleForDate.end,
+        startDate: editingRuleForDate.date,
+        endDate: editingRuleForDate.date,
+        weekdays: [wk],
+        enabledChecks: checksMatchParent ? undefined : ec,
+      };
       if (editingRuleForDate.variantId) {
         await updateVariant(rule.id, editingRuleForDate.variantId, payload);
       } else {
         await createVariant(rule.id, payload);
       }
-      toast.success("Horaires modifiés pour cette journée");
+      toast.success("Modifications enregistrées pour cette journée.");
       setEditingRuleForDate(null);
     } catch {
-      toast.error("Impossible de sauvegarder les horaires de ce jour. Réessayez.");
+      toast.error("Impossible de sauvegarder les modifications. Réessayez.");
     }
   }
 
@@ -569,22 +649,32 @@ const GMCBAdmin = () => {
       ruleActionModal.draft.end === selectedRuleForAction.end
     ) {
       if (ruleActionModal.variantId) {
-        await deleteVariant(selectedRuleForAction.id, ruleActionModal.variantId);
+        try {
+          await deleteVariant(selectedRuleForAction.id, ruleActionModal.variantId);
+          toast.success("Personnalisation supprimée — horaires réinitialisés aux valeurs d'origine.");
+        } catch {
+          toast.error("Impossible de supprimer la personnalisation. Réessayez.");
+          return;
+        }
       }
       closeRuleActionModal();
       return;
     }
     const draft = ruleActionModal.mode === "timing"
-      ? { kind: "timing" as const, start: ruleActionModal.draft.start, end: ruleActionModal.draft.end, startDate: ruleActionModal.draft.startDate, endDate: ruleActionModal.draft.endDate, weekdays: sortWeekdays(ruleActionModal.draft.weekdays) }
+      ? { kind: "timing" as const, start: ruleActionModal.draft.start, end: ruleActionModal.draft.end, startDate: ruleActionModal.draft.startDate, endDate: ruleActionModal.draft.endDate, weekdays: sortWeekdays(ruleActionModal.draft.weekdays), enabledChecks: ruleActionModal.draft.enabledChecks }
       : { kind: "availability" as const, active: false, startDate: ruleActionModal.draft.startDate, endDate: ruleActionModal.draft.endDate, weekdays: sortWeekdays(ruleActionModal.draft.weekdays) };
+    const isEdit = !!ruleActionModal.variantId;
+    const modeLabel = ruleActionModal.mode === "timing" ? "personnalisation" : "désactivation";
     try {
-      if (ruleActionModal.variantId) {
-        await updateVariant(selectedRuleForAction.id, ruleActionModal.variantId, draft);
+      if (isEdit) {
+        await updateVariant(selectedRuleForAction.id, ruleActionModal.variantId!, draft);
+        toast.success(`${selectedRuleForAction.name} — ${modeLabel} modifiée avec succès.`);
       } else {
         await createVariant(selectedRuleForAction.id, draft);
+        toast.success(`${selectedRuleForAction.name} — ${modeLabel} créée avec succès.`);
       }
     } catch {
-      toast.error("Impossible de sauvegarder la personnalisation. Réessayez.");
+      toast.error(`Impossible de sauvegarder la ${modeLabel}. Réessayez.`);
       return;
     }
     closeRuleActionModal();
@@ -592,7 +682,13 @@ const GMCBAdmin = () => {
 
   async function deleteRuleActionVariant() {
     if (!selectedRuleForAction || !ruleActionModal.variantId) return;
-    await deleteVariant(selectedRuleForAction.id, ruleActionModal.variantId);
+    try {
+      await deleteVariant(selectedRuleForAction.id, ruleActionModal.variantId);
+      toast.success(`Personnalisation de ${selectedRuleForAction.name} supprimée.`);
+    } catch {
+      toast.error("Impossible de supprimer la personnalisation. Réessayez.");
+      return;
+    }
     closeRuleActionModal();
   }
 
@@ -743,6 +839,48 @@ const GMCBAdmin = () => {
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", marginBottom: 4 }}>Anomalies</div>
                 <div style={{ fontSize: 18, fontWeight: 800, color: "#dc2626" }}>{stats.totalNok}</div>
               </div>
+            </div>
+
+            {/* Live check toggles */}
+            <div style={{ marginBottom: 20, padding: 16, borderRadius: 12, background: "#f0fdfa", border: "1px solid #99f6e4" }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#0f766e", textTransform: "uppercase", marginBottom: 10 }}>Contrôles qualité actifs</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {([
+                  { key: "barcode" as const, label: "Code-barres" },
+                  { key: "date"    as const, label: "Date" },
+                  { key: "anomaly" as const, label: "Anomalie" },
+                ]).map(({ key, label }) => {
+                  const on = stats.activeChecks[key];
+                  const camOk = key === "anomaly" ? stats.p1?.camera_available !== false : stats.p0?.camera_available !== false;
+                  return (
+                    <button key={key} onClick={async () => {
+                      if (!on && !camOk) {
+                        toast.error(`Caméra non connectée — impossible d'activer ${label}.`, { duration: 6000 });
+                        return;
+                      }
+                      const next = { ...stats.activeChecks, [key]: !on };
+                      if (!next.barcode && !next.date && !next.anomaly) { toast.error("Au moins un contrôle doit rester actif."); return; }
+                      try {
+                        await backendApi.updateSessionChecks(next);
+                        toast.success(`${label} ${!on ? "activé" : "désactivé"}`);
+                      } catch (err: unknown) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        if (msg.includes("camera_unavailable")) {
+                          toast.error(`Caméra ${label} inaccessible — vérifiez qu'elle est branchée.`, { duration: 8000 });
+                        } else {
+                          toast.error("Impossible de modifier ce contrôle.");
+                        }
+                      }
+                    }} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 14px", borderRadius: 8, border: `1px solid ${!camOk && !on ? "#fecaca" : on ? "#99f6e4" : "#e2e8f0"}`, background: !camOk && !on ? "#fef2f2" : on ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                      <div style={{ width: 14, height: 14, borderRadius: 3, border: `2px solid ${on ? "#0f766e" : !camOk ? "#fca5a5" : "#cbd5e1"}`, background: on ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                        {on && <svg width="8" height="6" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: on ? "#0f766e" : !camOk ? "#dc2626" : "#94a3b8" }}>{label}{!camOk && !on ? " — caméra absente" : ""}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ fontSize: 11, color: "#64748b", marginTop: 8 }}>Cliquez pour activer/désactiver un contrôle en temps réel.</div>
             </div>
 
             {/* Auto-stop scheduler */}
@@ -1075,12 +1213,6 @@ const GMCBAdmin = () => {
         </>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12, marginBottom: 18 }}>
           <div>
-            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Nom du shift</div>
-            <div style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #e2e8f0", fontSize: 13, background: "#f8fafc", color: "#0f172a", fontWeight: 800 }}>
-              {ruleDraft.name}
-            </div>
-          </div>
-          <div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Début</div>
             <input type="time" value={ruleDraft.start} onChange={(e) => setRuleDraft({ ...ruleDraft, start: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13 }} />
           </div>
@@ -1186,6 +1318,33 @@ const GMCBAdmin = () => {
             })}
           </div>
         </div>
+        {ruleActionModal.mode === "timing" && (() => {
+          const ec = ruleActionModal.draft.enabledChecks ?? selectedRuleForAction?.enabledChecks ?? { barcode: true, date: true, anomaly: true };
+          return (
+            <div style={{ display: "grid", gap: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: "#0f172a" }}>Contrôles qualité</div>
+              <div style={{ fontSize: 11, color: "#64748b" }}>Ces réglages s'appliquent uniquement sur la période/jours définis ci-dessus, en remplacement des contrôles du shift de base.</div>
+              {([
+                { key: "barcode" as const, label: "Code-barres", desc: "Paquets sans code-barres → NOK" },
+                { key: "date" as const, label: "Date", desc: "Paquets sans date lisible → NOK" },
+                { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle des défauts de surface" },
+              ]).map(({ key, label, desc }) => {
+                const on = ec[key];
+                return (
+                  <label key={key} onClick={() => setRuleActionModal((c) => ({ ...c, draft: { ...c.draft, enabledChecks: { ...(c.draft.enabledChecks ?? selectedRuleForAction?.enabledChecks ?? { barcode: true, date: true, anomaly: true }), [key]: !on } } }))} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 12px", borderRadius: 8, border: `1px solid ${on ? "#99f6e4" : "#e2e8f0"}`, background: on ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                    <div style={{ marginTop: 2, width: 16, height: 16, borderRadius: 4, border: `2px solid ${on ? "#0f766e" : "#cbd5e1"}`, background: on ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {on && <svg width="9" height="7" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: on ? "#0f766e" : "#64748b" }}>{label}</div>
+                      <div style={{ fontSize: 11, color: "#94a3b8" }}>{desc}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          );
+        })()}
       </AdminModal>
 
       {/* Single session modal */}
@@ -1279,7 +1438,7 @@ const GMCBAdmin = () => {
             {formatAdminDate(editingRuleForDate.date, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
           </div>
         )}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
           <div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>Début</div>
             <input type="time" value={editingRuleForDate?.start ?? ""} onChange={(e) => setEditingRuleForDate((d) => d ? { ...d, start: e.target.value } : d)} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13 }} />
@@ -1289,6 +1448,32 @@ const GMCBAdmin = () => {
             <input type="time" value={editingRuleForDate?.end ?? ""} onChange={(e) => setEditingRuleForDate((d) => d ? { ...d, end: e.target.value } : d)} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13 }} />
           </div>
         </div>
+        {editingRuleForDate && (() => {
+          const ec = editingRuleForDate.enabledChecks;
+          return (
+            <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#475569" }}>Contrôles qualité</div>
+              {([
+                { key: "barcode" as const, label: "Code-barres", desc: "NOK si absent" },
+                { key: "date" as const, label: "Date", desc: "NOK si illisible" },
+                { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle des défauts" },
+              ]).map(({ key, label, desc }) => {
+                const on = ec[key];
+                return (
+                  <label key={key} onClick={() => setEditingRuleForDate((d) => d ? { ...d, enabledChecks: { ...d.enabledChecks, [key]: !on } } : d)} style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "8px 12px", borderRadius: 8, border: `1px solid ${on ? "#99f6e4" : "#e2e8f0"}`, background: on ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                    <div style={{ marginTop: 2, width: 16, height: 16, borderRadius: 4, border: `2px solid ${on ? "#0f766e" : "#cbd5e1"}`, background: on ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      {on && <svg width="9" height="7" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: on ? "#0f766e" : "#64748b" }}>{label}</div>
+                      <div style={{ fontSize: 11, color: "#94a3b8" }}>{desc}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          );
+        })()}
       </AdminModal>
 
       <AlertDialog open={!!shiftToDelete} onOpenChange={(open) => !open && setShiftToDelete(null)}>
@@ -1310,19 +1495,6 @@ const GMCBAdmin = () => {
         </AlertDialogContent>
       </AlertDialog>
 
-      {historyDay && (
-        <HistDayModal
-          daySummary={historyDay}
-          defectLabel={(t) => t === "nobarcode" ? "Absence CB" : t === "nodate" ? "Date non visible" : "Anomalie"}
-          dayModalOrigin="admin"
-          canDelete={true}
-          onClose={() => setHistoryDay(null)}
-          onBackToCalendar={() => setHistoryDay(null)}
-          onSessionClick={() => { setHistoryDay(null); navigate("/clients/gmcb/historique"); }}
-          openFeedbackModal={openFeedbackModal}
-        />
-      )}
-
       {/* Confirm session start dialog */}
       {confirmSessionOpen && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
@@ -1331,19 +1503,19 @@ const GMCBAdmin = () => {
             <div style={{ fontSize: 13, color: "#64748b", marginBottom: 20 }}>Choisissez les contrôles actifs pour cette session :</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
               {([
-                { key: "barcode" as const, label: "Contrôle code-barres", desc: "Les paquets sans code-barres sont comptés NOK" },
-                { key: "date" as const, label: "Contrôle date", desc: "Les paquets sans date lisible sont comptés NOK" },
-                { key: "anomaly" as const, label: "Détection anomalie", desc: "Analyse visuelle des défauts de surface" },
-              ]).map(({ key, label, desc }) => {
-                const active = enabledChecks[key];
+                { key: "barcode" as const, label: "Contrôle code-barres", desc: "Les paquets sans code-barres sont comptés NOK", camOk: stats.p0?.camera_available !== false },
+                { key: "date" as const, label: "Contrôle date", desc: "Les paquets sans date lisible sont comptés NOK", camOk: stats.p0?.camera_available !== false },
+                { key: "anomaly" as const, label: "Détection anomalie", desc: stats.p1?.camera_available === false ? "Caméra non détectée — mode indisponible" : "Analyse visuelle des défauts de surface", camOk: stats.p1?.camera_available !== false },
+              ]).map(({ key, label, desc, camOk }) => {
+                const active = enabledChecks[key] && camOk;
                 return (
-                  <label key={key} onClick={() => setEnabledChecks(prev => ({ ...prev, [key]: !prev[key] }))} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", borderRadius: 10, border: `1px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
-                    <div style={{ marginTop: 2, width: 18, height: 18, borderRadius: 4, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
+                  <label key={key} onClick={() => { if (camOk) setEnabledChecks(prev => ({ ...prev, [key]: !prev[key] })); }} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", borderRadius: 10, border: `1px solid ${!camOk ? "#fecaca" : active ? "#99f6e4" : "#e2e8f0"}`, background: !camOk ? "#fef2f2" : active ? "#f0fdf9" : "#f8fafc", cursor: camOk ? "pointer" : "not-allowed", transition: "all 0.15s", opacity: camOk ? 1 : 0.65 }}>
+                    <div style={{ marginTop: 2, width: 18, height: 18, borderRadius: 4, border: `2px solid ${!camOk ? "#fca5a5" : active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
                       {active && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
                     </div>
                     <div>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: active ? "#0f766e" : "#64748b" }}>{label}</div>
-                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>{desc}</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: !camOk ? "#dc2626" : active ? "#0f766e" : "#64748b" }}>{label}{!camOk && " — indisponible"}</div>
+                      <div style={{ fontSize: 12, color: !camOk ? "#f87171" : "#94a3b8", marginTop: 2 }}>{desc}</div>
                     </div>
                   </label>
                 );

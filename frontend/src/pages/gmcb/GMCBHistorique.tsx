@@ -21,6 +21,7 @@ import { useSessionHistory, type DaySummary, type Session } from "@/hooks/useSes
 import { backendApi } from "@/core/backendApi";
 import { useShifts } from "@/hooks/useShifts";
 import { useOneOffSessions } from "@/hooks/useOneOffSessions";
+import { toast } from "sonner";
 
 function formatShortTime(date: Date | null): string {
   return formatTunisiaTime(date);
@@ -55,6 +56,7 @@ const GMCBHistorique = () => {
   const [sessionDetailView, setSessionDetailView] = useState<{ session: Session; daySummary: DaySummary } | null>(null);
   const [exportModal, setExportModal] = useState<AnomalyItem[] | null>(null);
   const [modalAnomaly, setModalAnomaly] = useState<AnomalyItem | null>(null);
+  const [downloadingDayReport, setDownloadingDayReport] = useState<string | null>(null);
 
   // Defect type → French label
   const defectLabel = (t: string) =>
@@ -99,6 +101,22 @@ const GMCBHistorique = () => {
 
     navigate(location.pathname, { replace: true, state: {} });
   }, [days, location.pathname, location.state, navigate, selectedDay, sessionDetailView]);
+
+  const handleDownloadDayReport = async (dayDate: string) => {
+    setDownloadingDayReport(dayDate);
+    try {
+      const { filename } = await backendApi.downloadReportPdf(dayDate, dayDate);
+      toast.success("Rapport journalier généré", {
+        description: filename,
+      });
+    } catch (err) {
+      toast.error("Impossible de générer le PDF du jour", {
+        description: err instanceof Error ? err.message : "Réessayez dans quelques instants.",
+      });
+    } finally {
+      setDownloadingDayReport(null);
+    }
+  };
 
   // ── Session Detail View ──
 
@@ -299,6 +317,16 @@ const GMCBHistorique = () => {
               <Metric label="Conformité" value={day.conformityPct.toFixed(1) + "%"} color="#16a34a" />
               <Metric label="Anomalies" value={day.totalAnomalies} color="#dc2626" />
               <Metric label="Sessions" value={day.sessionCount} color="#6366f1" />
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void handleDownloadDayReport(day.date);
+                }}
+                title="Télécharger le rapport PDF du jour"
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 6, border: "1px solid #bfdbfe", background: "#eff6ff", color: "#1d4ed8", fontSize: 12, cursor: "pointer", fontWeight: 700 }}
+              >
+                {downloadingDayReport === day.date ? <Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} /> : <Download size={13} />}
+              </button>
               <button onClick={(e) => { e.stopPropagation(); openFeedbackModal({ scope: "day", date: day.date }); }} title="Signaler un problème"
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 6, border: "1px solid #fde68a", background: "#fffbeb", color: "#92400e", fontSize: 12, cursor: "pointer", fontWeight: 700 }}>
                 <Flag size={13} />

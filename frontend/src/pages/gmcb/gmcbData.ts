@@ -273,6 +273,7 @@ export interface RuleVariant {
   startDate: string;
   endDate: string;
   weekdays: string[];
+  enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 export interface RecurringRule {
@@ -387,6 +388,12 @@ export function buildRuleSession(rule: RecurringRule, dateIso: string): PlannedS
     .filter((v) => v.kind === "availability")
     .forEach((v) => { disabled = !v.active; });
 
+  // Pass 3: timing variants may carry an enabledChecks override
+  let enabledChecks = rule.enabledChecks;
+  applicable
+    .filter((v) => v.kind === "timing" && v.enabledChecks !== undefined)
+    .forEach((v) => { enabledChecks = v.enabledChecks!; });
+
   return {
     id: `${rule.id}-${dateIso}`,
     source: "rule",
@@ -397,7 +404,7 @@ export function buildRuleSession(rule: RecurringRule, dateIso: string): PlannedS
     end,
     autoStart: rule.autoStart,
     disabled,
-    enabledChecks: rule.enabledChecks,
+    enabledChecks,
   };
 }
 
@@ -457,6 +464,15 @@ export function getRuleScheduleSummaries(rule: RecurringRule) {
   const formatPeriod = (startDate: string, endDate: string) => startDate === endDate
     ? formatAdminDate(startDate, { day: "2-digit", month: "2-digit", year: "numeric" })
     : `${formatAdminDate(startDate, { day: "2-digit", month: "2-digit", year: "numeric" })} au ${formatAdminDate(endDate, { day: "2-digit", month: "2-digit", year: "numeric" })}`;
+  const formatChecks = (ec?: { barcode: boolean; date: boolean; anomaly: boolean }) => {
+    if (!ec) return "";
+    const labels = [
+      ec.barcode ? "Barcode" : null,
+      ec.date ? "Date" : null,
+      ec.anomaly ? "Anomalie" : null,
+    ].filter(Boolean);
+    return labels.length === 3 ? "" : ` (${labels.length === 0 ? "aucun contrôle" : labels.join(", ")})`;
+  };
 
   const repeatingVariants = (rule.variants || []).filter((variant) => variant.startDate !== variant.endDate);
 
@@ -475,16 +491,19 @@ export function getRuleScheduleSummaries(rule: RecurringRule) {
 
   return [
     ...summaries,
-    ...repeatingVariants.map((variant) => ({
-      id: variant.id,
-      category: "variant",
-      tone: variant.kind === "availability" ? "danger" : "muted",
-      editable: true,
-      variant,
-      text: variant.kind === "timing"
-        ? `${variant.start} - ${variant.end} • ${formatWeekdays(variant.weekdays)} • ${formatPeriod(variant.startDate, variant.endDate)}`
-        : `Désactivé • ${formatWeekdays(variant.weekdays)} • ${formatPeriod(variant.startDate, variant.endDate)}`,
-    })),
+    ...repeatingVariants.map((variant) => {
+      const ec = variant.enabledChecks ?? rule.enabledChecks;
+      return {
+        id: variant.id,
+        category: "variant",
+        tone: variant.kind === "availability" ? "danger" : "muted",
+        editable: true,
+        variant,
+        text: variant.kind === "timing"
+          ? `${variant.start} - ${variant.end} • ${formatWeekdays(variant.weekdays)} • ${formatPeriod(variant.startDate, variant.endDate)}${formatChecks(ec)}`
+          : `Désactivé • ${formatWeekdays(variant.weekdays)} • ${formatPeriod(variant.startDate, variant.endDate)}`,
+      };
+    }),
   ];
 }
 

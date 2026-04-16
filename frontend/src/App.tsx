@@ -16,6 +16,7 @@ import GMCBLogin from "./pages/gmcb/GMCBLogin";
 import GMCBOverview from "./pages/gmcb/GMCBOverview.tsx";
 import GMCBQualite from "./pages/gmcb/GMCBQualite";
 import GMCBHistorique from "./pages/gmcb/GMCBHistorique";
+import GMCBRapports from "./pages/gmcb/GMCBRapports";
 import GMCBAdmin from "./pages/gmcb/GMCBAdmin";
 import GMCBSettings from "./pages/gmcb/GMCBSettings";
 import GMCBSuperAdmin from "./pages/gmcb/GMCBSuperAdmin";
@@ -43,6 +44,7 @@ const App = () => (
               <Route path="/clients/gmcb" element={<GMCBOverview />} />
               <Route path="/clients/gmcb/qualite" element={<GMCBQualite />} />
               <Route path="/clients/gmcb/historique" element={<GMCBHistorique />} />
+              <Route path="/clients/gmcb/rapports" element={<GMCBRapports />} />
               <Route path="/clients/gmcb/admin" element={<GMCBAdmin />} />
               <Route path="/clients/gmcb/settings" element={<GMCBSettings />} />
               <Route path="/clients/gmcb/admin_superadmin" element={<GMCBSuperAdmin />} />
