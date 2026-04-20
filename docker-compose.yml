@@ -38,6 +38,7 @@ services:
   backend:
     build:
       context: ./backend
+      network: host
     ports:
       - "5000:5000"
     container_name: gmcb_backend

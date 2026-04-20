@@ -161,6 +161,7 @@ export interface CreateOneOffPayload {
   date: string;
   start_time: string;
   end_time: string;
+  end_next_day?: boolean;
   camera_source?: string;
   checkpoint_id?: string;
   enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean };
@@ -261,6 +262,9 @@ export const statsApi = {
 
   getCrossings(sessionId: string, limit = 10) {
     return request("GET", `/stats/session/${sessionId}/crossings?limit=${limit}`);
+  },
+  getCheckChanges(groupId: string) {
+    return request("GET", `/stats/session/${groupId}/check-changes`);
   },
   deleteSession(sessionId: string) {
     return request("DELETE", `/stats/session/${sessionId}`);
@@ -534,6 +538,7 @@ export const backendApi = {
 
   // Session crossings
   getCrossings: (sessionId: string, limit = 10) => statsApi.getCrossings(sessionId, limit),
+  getCheckChanges: (groupId: string) => statsApi.getCheckChanges(groupId),
 
   // Session history
   getSessions: (limit = 100) => statsApi.sessions(limit),

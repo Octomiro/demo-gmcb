@@ -152,9 +152,12 @@ const GMCBOverview: React.FC = () => {
       const matchingHistory = matchingHistoryByShift ?? null;
       if (matchingHistory) usedHistoryIds.add(matchingHistory.id);
 
-      const scheduledEnd = timeToMinutes(session.end);
+      const scheduledEndRaw = timeToMinutes(session.end);
+      const scheduledStart = timeToMinutes(session.start);
+      const isOvernightShift = scheduledEndRaw < scheduledStart;
+      const scheduledEnd = isOvernightShift ? scheduledEndRaw + 1440 : scheduledEndRaw;
       const isCompleted = Boolean(matchingHistory?.ended_at) || scheduledEnd <= currentMinutes;
-      const isRunningNow = stats.isRunning && !isCompleted && currentMinutes >= timeToMinutes(session.start) && currentMinutes < scheduledEnd;
+      const isRunningNow = stats.isRunning && !isCompleted && currentMinutes >= scheduledStart && currentMinutes < scheduledEnd;
       const actualEndDate = parseBackendTimestamp(matchingHistory?.ended_at);
       const plannedDurationMinutes = Math.max(1, Math.round((plannedRange.end.getTime() - plannedRange.start.getTime()) / 60000));
       const interruptedMinutes = actualEndDate && actualEndDate.getTime() < plannedRange.end.getTime()

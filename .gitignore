@@ -22,11 +22,7 @@ venv/
 *.bak.*
 
 # ── Runtime data / volumes ──
-data/liveImages/*
-!data/liveImages/.gitkeep
-data/videos/*
-data/postgres/
-
+/data/*
 # ── Logs & reports ──
 backend/perf_snapshots.txt
 backend/*.log
@@ -43,4 +39,7 @@ frontend/dist-ssr/
 # ── OS ──
 .DS_Store
 Thumbs.db
-/SYSTEM_ARCHITECTURE.md
+
+ANOMALY_PIPELINE_AND_EJECTION_SPEC.txt
+SYSTEM_ARCHITECTURE.md
+TECHNICAL_AUDIT.txt
