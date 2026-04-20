@@ -1,3 +1,4 @@
+import json
 import os
 import queue
 import threading
@@ -38,8 +39,19 @@ class DBWriter:
         self._active = STATS_ENABLED_DEFAULT
         self._current_session_id = None
         self._pg_pool = None
+        self._dropped_events = 0
+        self._last_drop_warning = 0.0
 
         self._available = self._connect()
+
+    def log_dropped(self, event_type="unknown"):
+        """Increment dropped event counter and emit a rate-limited warning."""
+        self._dropped_events += 1
+        now = time.monotonic()
+        if now - self._last_drop_warning > 60.0:  # max 1 warning per minute
+            self._last_drop_warning = now
+            print(f"[DBWriter] WARNING: write_queue full — dropping '{event_type}' event. "
+                  f"Total dropped this session: {self._dropped_events}")
 
     def _connect(self):
         """Open the connection pool and verify connectivity. Returns True on success."""
@@ -114,18 +126,19 @@ class DBWriter:
     def backend(self):
         return "postgres"
 
-    def open_session(self, checkpoint_id="", camera_source="", group_id="", shift_id=""):
+    def open_session(self, checkpoint_id="", camera_source="", group_id="", shift_id="", enabled_checks=None):
         sid = str(uuid.uuid4())
         with self._lock:
             self._current_session_id = sid
+        checks_json = json.dumps(enabled_checks) if enabled_checks else '{"barcode":true,"date":true,"anomaly":true}'
         conn = self._get_pg_conn()
         if conn:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO sessions (id, group_id, shift_id, started_at, checkpoint_id, camera_source) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)",
-                        (sid, group_id, shift_id, _ts(), checkpoint_id, camera_source),
+                        "INSERT INTO sessions (id, group_id, shift_id, started_at, checkpoint_id, camera_source, enabled_checks) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (sid, group_id, shift_id, _ts(), checkpoint_id, camera_source, checks_json),
                     )
                 conn.commit()
             except Exception as e:
@@ -194,7 +207,7 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id, group_id, shift_id, started_at, ended_at, checkpoint_id, camera_source, "
-                    "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly "
+                    "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly, enabled_checks "
                     "FROM sessions ORDER BY started_at DESC LIMIT %s",
                     (limit,),
                 )
@@ -259,6 +272,7 @@ class DBWriter:
                     "checkpoint_ids": [],
                     "session_ids": [],
                     "sessions": [],
+                    "enabled_checks": None,
                 }
             g = groups[gid]
             cp = r.get("checkpoint_id", "")
@@ -274,6 +288,16 @@ class DBWriter:
                 g["checkpoint_ids"].append(cp)
             g["session_ids"].append(r["id"])
             g["sessions"].append(r)
+            # Merge enabled_checks (first non-null wins)
+            if g["enabled_checks"] is None and r.get("enabled_checks"):
+                raw_ec = r["enabled_checks"]
+                if isinstance(raw_ec, str):
+                    try:
+                        g["enabled_checks"] = json.loads(raw_ec)
+                    except Exception:
+                        g["enabled_checks"] = raw_ec
+                else:
+                    g["enabled_checks"] = raw_ec
             # earliest start / latest end
             if r["started_at"] and (not g["started_at"] or r["started_at"] < g["started_at"]):
                 g["started_at"] = r["started_at"]
@@ -301,89 +325,6 @@ class DBWriter:
                 return [dict(r) for r in cur.fetchall()]
         except Exception as e:
             print(f"[DBWriter] list_crossings_for_group error: {e}")
-            return []
-        finally:
-            self._release_pg_conn(conn)
-
-    def get_hourly_stats(self, session_id):
-        """Return per-hour conformity stats for a session."""
-        if not self._available or not session_id:
-            return []
-        conn = self._get_pg_conn()
-        if not conn:
-            return []
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                # Get session info
-                cur.execute(
-                    "SELECT started_at, ended_at, total, ok_count FROM sessions WHERE id = %s",
-                    (session_id,),
-                )
-                sess = cur.fetchone()
-                if not sess:
-                    return []
-
-                # Count defects grouped by hour
-                cur.execute(
-                    "SELECT EXTRACT(HOUR FROM crossed_at::timestamp)::int AS hour, "
-                    "COUNT(*) AS defect_count, "
-                    "SUM(CASE WHEN defect_type = 'anomaly' THEN 1 ELSE 0 END)::int AS anomaly_count "
-                    "FROM defective_packets WHERE session_id = %s "
-                    "GROUP BY hour ORDER BY hour",
-                    (session_id,),
-                )
-                defect_rows = {int(r["hour"]): dict(r) for r in cur.fetchall()}
-
-                # Count ALL crossings (ok + nok) per hour from a crossing log
-                # Since we only log defective packets, we derive from session totals
-                # Use session start/end to figure out which hours are active
-                cur.execute(
-                    "SELECT EXTRACT(HOUR FROM crossed_at::timestamp)::int AS hour, COUNT(*) AS cnt "
-                    "FROM defective_packets WHERE session_id = %s GROUP BY hour ORDER BY hour",
-                    (session_id,),
-                )
-
-                started = sess.get("started_at")
-                ended = sess.get("ended_at")
-                total = sess.get("total", 0) or 0
-                ok_count = sess.get("ok_count", 0) or 0
-
-                # Build hourly buckets from defect data
-                result = []
-                for hour_val, info in defect_rows.items():
-                    defect_count = info.get("defect_count", 0)
-                    anomaly_count = info.get("anomaly_count", 0)
-                    # We can't know exact total per hour without a full crossing log,
-                    # so report defect stats per hour
-                    result.append({
-                        "hour": hour_val,
-                        "defect_count": defect_count,
-                        "anomaly_count": anomaly_count,
-                        "conformity_pct": 0.0,
-                        "cadence": 0,
-                    })
-
-                # If we have session-level totals, distribute proportionally
-                # or compute conformity from the overall session rate
-                if total > 0:
-                    overall_conformity = (ok_count / total) * 100
-                    total_defects = sum(r["defect_count"] for r in result)
-                    for r in result:
-                        if total_defects > 0:
-                            weight = r["defect_count"] / total_defects
-                            estimated_total_for_hour = int(total * weight) if total_defects > 0 else 0
-                            ok_for_hour = max(0, estimated_total_for_hour - r["defect_count"])
-                            r["conformity_pct"] = round(
-                                (ok_for_hour / estimated_total_for_hour * 100) if estimated_total_for_hour > 0 else 100.0, 2
-                            )
-                            # cadence: packets per minute (rough estimate)
-                            r["cadence"] = round(estimated_total_for_hour / 60, 1)
-                        else:
-                            r["conformity_pct"] = 100.0
-
-                return result
-        except Exception as e:
-            print(f"[DBWriter] get_hourly_stats error: {e}")
             return []
         finally:
             self._release_pg_conn(conn)
@@ -545,6 +486,7 @@ class DBWriter:
             "queue_max": self.write_queue.maxsize,
             "active": self.is_active,
             "session_id": self.current_session_id,
+            "dropped_events": self._dropped_events,
         }
 
     # ═══════════════════════════════════════════════
@@ -615,7 +557,8 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id, label, type, start_time, end_time, start_date, end_date, "
-                    "session_date, days_of_week, camera_source, checkpoint_id, active, created_at "
+                    "session_date, days_of_week, camera_source, checkpoint_id, "
+                    "enabled_pipelines, enabled_checks, active, created_at "
                     "FROM shifts WHERE type = 'recurring' OR type IS NULL ORDER BY start_time"
                 )
                 shifts = [dict(r) for r in cur.fetchall()]
@@ -655,6 +598,7 @@ class DBWriter:
             shift.get("camera_source", "0"),
             shift.get("checkpoint_id", "tracking"),
             shift.get("enabled_pipelines", '["pipeline_barcode_date","pipeline_anomaly"]'),
+            shift.get("enabled_checks", '{"barcode":true,"date":true,"anomaly":true}'),
             shift.get("active", 1),
             shift["created_at"],
         )
@@ -665,8 +609,8 @@ class DBWriter:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO shifts (id, label, type, start_time, end_time, start_date, end_date, "
-                    "session_date, days_of_week, camera_source, checkpoint_id, enabled_pipelines, active, created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "session_date, days_of_week, camera_source, checkpoint_id, enabled_pipelines, enabled_checks, active, created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
             conn.commit()
@@ -682,7 +626,7 @@ class DBWriter:
         if not self._available or not shift_id or not fields:
             return False
         allowed = {"label", "start_time", "end_time", "start_date", "end_date",
-                   "days_of_week", "camera_source", "checkpoint_id", "enabled_pipelines", "active"}
+                   "days_of_week", "camera_source", "checkpoint_id", "enabled_pipelines", "enabled_checks", "active"}
         cols = {k: v for k, v in fields.items() if k in allowed}
         if not cols:
             return False
@@ -848,7 +792,7 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     "SELECT id, label, session_date AS date, start_time, end_time, "
-                    "camera_source, checkpoint_id, created_at "
+                    "camera_source, checkpoint_id, enabled_checks, created_at "
                     "FROM shifts WHERE type = 'one_off' ORDER BY session_date, start_time"
                 )
                 return [dict(r) for r in cur.fetchall()]
@@ -869,6 +813,7 @@ class DBWriter:
             "[]",
             session.get("camera_source", "0"),
             session.get("checkpoint_id", "tracking"),
+            session.get("enabled_checks", '{"barcode":true,"date":true,"anomaly":true}'),
             1,
             session["created_at"],
         )
@@ -880,8 +825,8 @@ class DBWriter:
                 cur.execute(
                     "INSERT INTO shifts "
                     "(id, label, type, start_time, end_time, session_date, days_of_week, "
-                    "camera_source, checkpoint_id, active, created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "camera_source, checkpoint_id, enabled_checks, active, created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
             conn.commit()

@@ -85,6 +85,12 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self.video_source = None
         self.cap = None
         self.is_running = False
+        # Thread references for safe join on stop
+        self._reader_thread = None
+        self._detector_thread = None
+        self._compositor_thread = None
+        # Track last secondary model future to avoid queue buildup
+        self._last_sec_future = None
 
         # ── Raw frame from reader (always latest, always smooth) ──
         self._raw_frame = None
@@ -319,6 +325,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         self._nok_no_barcode = 0
         self._nok_no_date = 0
         self._nok_anomaly = 0
+        self._last_sec_future = None
 
     # ─────────────────────────────────────────
     # PROOF IMAGE SAVING
@@ -352,8 +359,17 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
             print(f"[PROOF] Failed to save {img_path}: {e}")
 
     def _save_proof_image_bg(self, pkt_num, defect_type, frame, bbox=None):
-        """Fire-and-forget: save proof image via bounded thread pool."""
+        """Fire-and-forget: save proof image via bounded thread pool.
+        Drops task if queue is backing up to prevent RAM exhaustion."""
         if not self._stats_active or not self._db_session_id:
+            return
+        # Guard: drop if too many tasks are already queued (disk too slow)
+        try:
+            queue_depth = _proof_executor._work_queue.qsize()
+        except Exception:
+            queue_depth = 0
+        if queue_depth > 50:
+            print(f"[PROOF] Queue full ({queue_depth}), dropping proof for packet #{pkt_num}")
             return
         frame_copy = frame.copy()
         session_now = self._db_session_id
@@ -378,7 +394,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
     # STATS RECORDING
     # ─────────────────────────────────────────
 
-    def set_stats_recording(self, active, group_id="", shift_id="", end_reason=None):
+    def set_stats_recording(self, active, group_id="", shift_id="", end_reason=None, enabled_checks=None):
         active = bool(active)
         if active == self._stats_active:
             return {"stats_active": self._stats_active, "session_id": self._db_session_id}
@@ -391,7 +407,11 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
                     self._db_writer_started = True
                 cp_id = (self.current_checkpoint or {}).get("id", "")
                 cam_src = str(self.video_source or "")
-                new_sid = self._db_writer.open_session(checkpoint_id=cp_id, camera_source=cam_src, group_id=group_id, shift_id=shift_id)
+                new_sid = self._db_writer.open_session(
+                    checkpoint_id=cp_id, camera_source=cam_src,
+                    group_id=group_id, shift_id=shift_id,
+                    enabled_checks=enabled_checks or self._enabled_checks,
+                )
                 self._db_writer.set_active(True)
             self._db_session_id = new_sid
             self._stats_active = True
@@ -450,22 +470,40 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         my_gen = self._session_gen
         self.is_running = True
 
-        # Launch THREE parallel threads
-        threading.Thread(target=self._reader_loop,     args=(my_gen,), daemon=True, name="VideoReader").start()
-        threading.Thread(target=self._detection_loop,  daemon=True, name="YOLODetector").start()
-        threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor").start()
+        # Launch THREE parallel threads and store references for safe join
+        self._reader_thread = threading.Thread(target=self._reader_loop, args=(my_gen,), daemon=True, name="VideoReader")
+        self._detector_thread = threading.Thread(target=self._detection_loop, daemon=True, name="YOLODetector")
+        self._compositor_thread = threading.Thread(target=self._compositor_loop, daemon=True, name="Compositor")
+        self._reader_thread.start()
+        self._detector_thread.start()
+        self._compositor_thread.start()
 
         return {"status": "started", "source": video_source, "mode": "live"}
 
     def stop_processing(self):
         self.is_running = False
-        time.sleep(0.5)
+        # Signal events so blocked threads wake up immediately
+        self._det_event.set()
+        self._raw_changed.set()
+        # Join all threads with timeout to ensure clean stop before next start
+        for t in (self._reader_thread, self._detector_thread, self._compositor_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=5.0)
+        self._reader_thread = None
+        self._detector_thread = None
+        self._compositor_thread = None
         if self.cap:
             try:
                 self.cap.release()
             except Exception:
                 pass
             self.cap = None
+        self._ad_track_states.clear()
+        with self._raw_history_lock:
+            self._raw_history.clear()
+        if hasattr(self, '_det_frame') and self._det_frame is not None:
+            del self._det_frame
+            self._det_frame = None
         try:
             import torch
             if torch.cuda.is_available():
@@ -688,6 +726,13 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
                     continue
 
                 last_processed_idx = frame_idx
+                if frame_idx % 30 == 0:
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
                 t_start = time.time()
                 lag_frames = max(0, self.frame_count - frame_idx)
                 with self._perf_lock:
@@ -728,6 +773,7 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
                     self._process_anomaly_frame(frame, frame_idx, results, t_start)
                 else:
                     self._process_tracking_frame(frame, frame_idx, results, t_start)
+                del results
 
             print("[DETECTOR] Stopped")
 

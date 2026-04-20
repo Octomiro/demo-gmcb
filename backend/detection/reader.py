@@ -31,40 +31,42 @@ class ReaderMixin:
                 self._reader_loop_video_file(session_gen, src)
                 return
 
-            if isinstance(src, str) and src.startswith("rtsp://"):
+            cap = None
+            _is_rtsp = isinstance(src, str) and src.startswith("rtsp://")
+            if _is_rtsp:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
-                self.cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             else:
                 import platform
                 if isinstance(src, str) and src.isdigit():
                     src = int(src)
                 if platform.system() == "Windows":
-                    self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                    cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
                 else:
-                    self.cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                    cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
                 # Order matters for V4L2: FOURCC → WIDTH → HEIGHT → FPS (last).
                 # Setting WIDTH/HEIGHT fires VIDIOC_S_FMT which resets FPS;
                 # VIDIOC_S_PARM (FPS) must be issued after the format is final.
-                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
-                self.cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)   # LAST: after format
-                self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # 2 = USB double-buffer; 1 starves DMA → 15fps
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)   # LAST: after format
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # 2 = USB double-buffer; 1 starves DMA → 15fps
 
-            if not self.cap or not self.cap.isOpened():
+            if not cap or not cap.isOpened():
                 print(f"[READER] ERROR: Cannot open source: {src}")
                 self.is_running = False
                 return
 
-            raw_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            raw_fps = cap.get(cv2.CAP_PROP_FPS)
             # Live cameras often report 0; use requested CAMERA_FPS as fallback
             fps = raw_fps if raw_fps and raw_fps > 0 else CAMERA_FPS
-            w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
             # Read back the actual negotiated fourcc so we can confirm MJPG was accepted
-            fourcc_int = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
             fourcc_str = "".join(chr((fourcc_int >> (8 * i)) & 0xFF) for i in range(4))
             usb_bw_mbps = w * h * fps * 2 / 1_000_000  # YUYV worst-case bandwidth
             print(
@@ -75,8 +77,9 @@ class ReaderMixin:
 
             # Flush stale frames accumulated in the V4L2/driver buffer before
             # entering the main loop, so the stream starts from a fresh frame.
+            self.cap = cap
             for _ in range(4):
-                self.cap.grab()
+                cap.grab()
 
             with self._stats_lock:
                 self.stats["video_fps"] = round(fps, 1)
@@ -88,26 +91,86 @@ class ReaderMixin:
             self._frame_width = w
             self._frame_height = h
 
-            # Rolling reader-FPS measurement (updated every 30 frames)
+            # Rolling reader-FPS measurement (updated every 5 frames → ~167ms response)
             _rfps_count = 0
             _rfps_t0 = time.monotonic()
 
             while self.is_running:
-                ret, frame = self.cap.read()
+                ret, frame = cap.read()
                 if not ret:
-                    break
+                    # USB detached or stream lost — attempt reconnect (USB only)
+                    if _is_rtsp:
+                        print("[READER] RTSP stream lost — stopping")
+                        break
+                    print("[READER] Camera read failed — waiting for USB reconnect...")
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    cap = None
+                    self.cap = None
+                    with self._stats_lock:
+                        self.stats["camera_reconnecting"] = True
+                    reconnected = False
+                    import platform
+                    attempt = 0
+                    while self.is_running and self._session_gen == session_gen:
+                        time.sleep(2.0)
+                        if not self.is_running or self._session_gen != session_gen:
+                            break
+                        attempt += 1
+                        print(f"[READER] Reconnect attempt {attempt} (waiting for USB camera) ...")
+                        try:
+                            if platform.system() == "Windows":
+                                new_cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+                            else:
+                                new_cap = cv2.VideoCapture(src, cv2.CAP_V4L2)
+                            new_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                            new_cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+                            new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+                            new_cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
+                            new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+                            if new_cap.isOpened():
+                                # flush stale frames
+                                for _ in range(4):
+                                    new_cap.grab()
+                                cap = new_cap
+                                self.cap = cap
+                                reconnected = True
+                                print(f"[READER] USB camera reconnected (attempt {attempt})")
+                                break
+                            else:
+                                new_cap.release()
+                        except Exception as ex:
+                            print(f"[READER] Reconnect attempt {attempt} error: {ex}")
+                    with self._stats_lock:
+                        self.stats["camera_reconnecting"] = False
+                    if not reconnected:
+                        # Session was stopped externally — exit cleanly
+                        break
+                    continue   # resume reading from the new cap
 
                 self.frame_count += 1
                 frame_idx = self.frame_count
 
-                # Live reader FPS — measured from wall-clock, updated every 30 frames
+                # Live reader FPS + USB bandwidth estimate — updated every 5 frames
                 _rfps_count += 1
-                if _rfps_count == 30:
+                if _rfps_count == 5:
                     _rfps_t1 = time.monotonic()
                     elapsed = _rfps_t1 - _rfps_t0
                     if elapsed > 0:
+                        rfps = round(5.0 / elapsed, 1)
+                        # Re-encode one frame to JPEG to measure actual compressed size
+                        # (approximates MJPG frame size the camera sends over USB)
+                        try:
+                            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            frame_bytes = len(buf) if ok else (frame.nbytes // 8)
+                        except Exception:
+                            frame_bytes = frame.nbytes // 8
+                        bw_mbps = round(frame_bytes * rfps * 8 / 1e6, 1)
                         with self._stats_lock:
-                            self.stats["reader_fps"] = round(30.0 / elapsed, 1)
+                            self.stats["reader_fps"] = rfps
+                            self.stats["camera_bw_mbps"] = bw_mbps
                     _rfps_t0 = _rfps_t1
                     _rfps_count = 0
 
@@ -140,12 +203,12 @@ class ReaderMixin:
             traceback.print_exc()
         finally:
             time.sleep(0.1)  # Let other threads notice is_running change
-            if self.cap:
+            if cap:
                 try:
-                    self.cap.release()
+                    cap.release()
                 except Exception:
                     pass
-                self.cap = None
+            self.cap = None
             # Only update shared state if this is still the current session;
             # a newer session may have already set is_running = True.
             if self._session_gen == session_gen:

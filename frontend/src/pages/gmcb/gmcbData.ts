@@ -281,6 +281,7 @@ export interface RecurringRule {
   endDate: string;
   weekdays: string[];
   enabledPipelines: string[];
+  enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean };
   autoStart: boolean;
   active: boolean;
   variants: RuleVariant[];
@@ -294,6 +295,7 @@ export interface OneOffSession {
   end: string;
   autoStart: boolean;
   createdAt?: string;
+  enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 export interface PlannedSession {
@@ -307,6 +309,7 @@ export interface PlannedSession {
   autoStart: boolean;
   disabled: boolean;
   color?: string;
+  enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 // TODO: backend feature needed — no endpoint exists yet
@@ -391,6 +394,7 @@ export function buildRuleSession(rule: RecurringRule, dateIso: string): PlannedS
     end,
     autoStart: rule.autoStart,
     disabled,
+    enabledChecks: rule.enabledChecks,
   };
 }
 
@@ -500,6 +504,7 @@ export function getDefaultRuleDraft(today: string) {
     endDate: addDays(today, 60),
     weekdays: ["mon", "tue", "wed", "thu", "fri"],
     enabledPipelines: ["pipeline_barcode_date", "pipeline_anomaly"],
+    enabledChecks: { barcode: true, date: true, anomaly: true } as { barcode: boolean; date: boolean; anomaly: boolean },
   };
 }
 
@@ -509,6 +514,7 @@ export function getDefaultSingleDraft(dateIso: string) {
     start: "09:00",
     end: "10:30",
     autoStart: true,
+    enabledChecks: { barcode: true, date: true, anomaly: true } as { barcode: boolean; date: boolean; anomaly: boolean },
   };
 }
 

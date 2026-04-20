@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ScanLine, CheckCircle2, AlertCircle, Camera, Timer, Video,
-  Maximize2, Settings, Filter, ChevronRight, Eye, X,
+  RefreshCw, Settings, Filter, ChevronRight, Eye, X,
   SlidersHorizontal, RotateCw, ArrowLeftRight, PlayCircle, LayoutDashboard, ArrowLeft,
   Loader2, Square, Clock,
 } from "lucide-react";
@@ -26,7 +26,6 @@ const GMCBQualite = () => {
   const [sessionStartTime, setSessionStartTime] = useState<string | null>(null);
   const sessionStartTimeRef = useRef<string | null>(null);
   const dbWasDown = useRef(false);
-  const [hourlyStats, setHourlyStats] = useState<any[]>([]);
   const [selectedPipeline, setSelectedPipeline] = useState("pipeline_barcode_date");
   const [pipelineOptions, setPipelineOptions] = useState<Array<{ id: string; label: string }>>([]);
   const [crossings, setCrossings] = useState<any[]>([]);
@@ -43,10 +42,12 @@ const GMCBQualite = () => {
   const [scheduledStop, setScheduledStop] = useState<string | null>(null);
   const [stopTimeInput, setStopTimeInput] = useState("");
   const [stopPickerOpen, setStopPickerOpen] = useState(false);
-  const [scheduleSessionOpen, setScheduleSessionOpen] = useState(false);
-  const [scheduleSessionTime, setScheduleSessionTime] = useState("");
+  const [startMode, setStartMode] = useState<null | "direct" | "scheduled">(null);
+  const [stopTimeForStart, setStopTimeForStart] = useState("");
   const [schedulingSession, setSchedulingSession] = useState(false);
+  const [streamRefreshToken, setStreamRefreshToken] = useState(0);
   const wasRunningRef = useRef(false);
+  const [qualiteChecks, setQualiteChecks] = useState({ barcode: true, date: true, anomaly: true });
 
   // Defect type → French label
   const defectLabel = (t: string) =>
@@ -108,30 +109,8 @@ const GMCBQualite = () => {
     }).catch(() => {});
   }, [selectedPipeline]);
 
-  // Fetch hourly conformity stats
-  useEffect(() => {
-    let cancelled = false;
-    async function fetchHourlyStats() {
-      if (!stats.isRunning) {
-        setHourlyStats([]);
-        return;
-      }
-      try {
-        const promises: Promise<any>[] = [];
-        if (stats.sessionId0) promises.push(backendApi.getHourlyStats(stats.sessionId0));
-        if (stats.sessionId1) promises.push(backendApi.getHourlyStats(stats.sessionId1));
-        const results = await Promise.all(promises);
-        const merged = results.flatMap((r: any) => r?.hourly_stats ?? []);
-        if (!cancelled) setHourlyStats(merged);
-      } catch {
-        // silent — keep previous hourly stats
-      }
-    }
-    fetchHourlyStats();
-    return () => { cancelled = true; };
-  }, [stats.isRunning, stats.sessionId0, stats.sessionId1]);
-
-  // Fetch crossings whenever totalPackets changes (every crossing = new packet detected)
+  // Fetch crossings on mount, whenever sessionIds/totalPackets change, and on a short poll interval
+  const fetchCrossingsRef = useRef<() => void>(() => {});
   useEffect(() => {
     let cancelled = false;
     async function fetchCrossings() {
@@ -151,9 +130,17 @@ const GMCBQualite = () => {
         // silent — keep previous crossings
       }
     }
+    fetchCrossingsRef.current = fetchCrossings;
     fetchCrossings();
     return () => { cancelled = true; };
   }, [stats.sessionId0, stats.sessionId1, stats.totalPackets]);
+
+  // Poll crossings every 3s independently so new anomalies appear without waiting for totalPackets change
+  useEffect(() => {
+    if (!stats.isRunning) return;
+    const id = setInterval(() => fetchCrossingsRef.current(), 3000);
+    return () => clearInterval(id);
+  }, [stats.isRunning]);
 
   // Map crossings to AnomalyItem shape for existing filter / gallery / modal UI
   const anomalyItems: AnomalyItem[] = crossings.map((c: any, i: number) => ({
@@ -184,6 +171,15 @@ const GMCBQualite = () => {
 
   // MJPEG stream: use ref so we can kill the connection on unmount / page switch
   const mjpegRef = useRef<HTMLImageElement | null>(null);
+  const refreshLiveFeed = (showToast = true) => {
+    if (mjpegRef.current) {
+      mjpegRef.current.style.visibility = "hidden";
+      mjpegRef.current.src = "";
+    }
+    setStreamRefreshToken((token) => token + 1);
+    if (showToast) toast.success("Flux live actualise.");
+  };
+
   useEffect(() => {
     return () => {
       // On unmount, blank the src to close the MJPEG HTTP connection
@@ -241,95 +237,164 @@ const GMCBQualite = () => {
       {/* No-active-session overlay */}
       {showNoSessionModal && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(2,6,23,0.9)", backdropFilter: "blur(16px) saturate(0.7)", WebkitBackdropFilter: "blur(16px) saturate(0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-          <div style={{ background: "rgba(255,255,255,0.98)", borderRadius: 24, width: 420, maxWidth: "94vw", padding: 40, textAlign: "center", boxShadow: "0 36px 120px rgba(0,0,0,0.55)", border: "1px solid rgba(255,255,255,0.18)" }}>
-            {/* icon */}
-            <div style={{ width: 64, height: 64, borderRadius: "50%", background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
-              <Video size={32} color="#94a3b8" />
-            </div>
-            <h2 style={{ margin: "0 0 8px", fontSize: 20, fontWeight: 800, color: "#0f172a" }}>Aucun live en cours</h2>
-            <p style={{ margin: "0 0 32px", fontSize: 14, color: "#64748b", lineHeight: 1.6 }}>Aucune session de contrôle n'est active en ce moment. Vous pouvez démarrer une session manuellement ou planifier des créneaux depuis le tableau de bord admin.</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <button
-                disabled={startingSession}
-                onClick={async () => {
-                  setStartingSession(true);
-                  try {
-                    await backendApi.startAll();
-                    await backendApi.toggleRecording();
-                  } catch {
-                    toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
-                  } finally { setStartingSession(false); }
-                }}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 24px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#0ea5e9,#0d9488)", color: "#fff", fontSize: 15, fontWeight: 700, cursor: startingSession ? "wait" : "pointer", opacity: startingSession ? 0.7 : 1 }}
-              >
-                <PlayCircle size={18} /> {startingSession ? "Démarrage…" : "Démarrer une session"}
-              </button>
+          <div style={{ background: "#fff", borderRadius: 24, width: 440, maxWidth: "94vw", boxShadow: "0 36px 120px rgba(0,0,0,0.55)", border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-              {/* Schedule session: start now + set end time */}
-              {!scheduleSessionOpen ? (
-                <button
-                  disabled={startingSession || schedulingSession}
-                  onClick={() => setScheduleSessionOpen(true)}
-                  style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 24px", borderRadius: 12, border: "none", background: "#b45309", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
-                >
-                  <Clock size={16} /> Démarrer et planifier la fin
-                </button>
-              ) : (
-                <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "14px 16px", textAlign: "left" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#92400e", marginBottom: 8 }}>Heure d'arrêt automatique (Tunisie) :</div>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                    <input
-                      type="time"
-                      value={scheduleSessionTime}
-                      onChange={e => setScheduleSessionTime(e.target.value)}
-                      style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 10px", fontSize: 14, fontWeight: 600 }}
-                    />
-                    <button
-                      disabled={!scheduleSessionTime || schedulingSession}
-                      onClick={async () => {
-                        if (!scheduleSessionTime) return;
-                        setSchedulingSession(true);
-                        try {
-                          await backendApi.startAll();
-                          await backendApi.toggleRecording();
-                          const r = await backendApi.scheduleStop(scheduleSessionTime);
-                          setScheduledStop(r.scheduled_stop);
-                          setScheduleSessionOpen(false);
-                          setScheduleSessionTime("");
-                          toast.success(`Session démarrée — arrêt automatique ${formatStopCountdown(r.scheduled_stop)}.`);
-                        } catch {
-                          toast.error("Impossible de démarrer la session planifiée.");
-                        } finally { setSchedulingSession(false); }
-                      }}
-                      style={{ background: "#b45309", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: scheduleSessionTime && !schedulingSession ? "pointer" : "not-allowed", opacity: scheduleSessionTime && !schedulingSession ? 1 : 0.5 }}
-                    >{schedulingSession ? "…" : "Démarrer"}</button>
-                    <button
-                      onClick={() => { setScheduleSessionOpen(false); setScheduleSessionTime(""); }}
-                      style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", fontSize: 13, cursor: "pointer", color: "#64748b" }}
-                    ><X size={14} /></button>
+            {/* ── Step 1: choose action ── */}
+            {startMode === null && (
+              <>
+                <div style={{ padding: "28px 28px 20px", textAlign: "center", borderBottom: "1px solid #f1f5f9" }}>
+                  <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
+                    <Video size={28} color="#94a3b8" />
                   </div>
-                  <div style={{ fontSize: 11, color: "#94a3b8" }}>La session s'arrêtera automatiquement à l'heure choisie.</div>
+                  <div style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Aucun live en cours</div>
+                  <div style={{ fontSize: 13, color: "#64748b", lineHeight: 1.6 }}>Aucune session de contrôle n'est active en ce moment.</div>
                 </div>
-              )}
-              <button
-                onClick={() => navigate("/clients/gmcb/historique", { state: { openLatestSession: true } })}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 24px", borderRadius: 12, border: "1px solid #cbd5e1", background: "#fff", color: "#0f172a", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
-              >
-                <Eye size={16} /> Voir la derniere session
-              </button>
-              <button
-                onClick={() => navigate("/clients/gmcb/admin")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 24px", borderRadius: 12, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#0f172a", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
-              >
-                <LayoutDashboard size={16} /> Aller au tableau de bord admin
-              </button>
-              <button
-                onClick={() => navigate(-1)}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "11px 24px", borderRadius: 12, border: "none", background: "transparent", color: "#64748b", fontSize: 14, cursor: "pointer" }}
-              >
-                <ArrowLeft size={15} /> Retour
-              </button>
-            </div>
+                <div style={{ padding: "20px 28px 28px", display: "flex", flexDirection: "column", gap: 10 }}>
+                  <button
+                    disabled={startingSession}
+                    onClick={() => setStartMode("direct")}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 20px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#0ea5e9,#0d9488)", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer" }}
+                  >
+                    <PlayCircle size={18} /> Démarrer une session
+                  </button>
+                  <button
+                    disabled={startingSession || schedulingSession}
+                    onClick={() => setStartMode("scheduled")}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 20px", borderRadius: 12, border: "none", background: "#b45309", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
+                  >
+                    <Clock size={16} /> Démarrer et planifier la fin
+                  </button>
+                  <button
+                    onClick={() => navigate("/clients/gmcb/historique", { state: { openLatestSession: true } })}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "12px 20px", borderRadius: 12, border: "1px solid #e2e8f0", background: "#fff", color: "#0f172a", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+                  >
+                    <Eye size={16} /> Voir la dernière session
+                  </button>
+                  <button
+                    onClick={() => navigate("/clients/gmcb/admin")}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "12px 20px", borderRadius: 12, border: "1px solid #e2e8f0", background: "#f8fafc", color: "#0f172a", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+                  >
+                    <LayoutDashboard size={16} /> Aller au tableau de bord admin
+                  </button>
+                  <button
+                    onClick={() => navigate(-1)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "10px 20px", borderRadius: 12, border: "none", background: "transparent", color: "#94a3b8", fontSize: 14, cursor: "pointer" }}
+                  >
+                    <ArrowLeft size={15} /> Retour
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* ── Step 2: configure checks (+ stop time) then confirm ── */}
+            {startMode !== null && (
+              <>
+                <div style={{ padding: "20px 28px 16px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "center", gap: 12 }}>
+                  <button
+                    onClick={() => { setStartMode(null); setStopTimeForStart(""); }}
+                    style={{ width: 34, height: 34, borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", flexShrink: 0 }}
+                  >
+                    <ArrowLeft size={16} />
+                  </button>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: "#0f172a" }}>
+                      {startMode === "scheduled" ? "Contrôles & heure d'arrêt" : "Contrôles qualité"}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                      {startMode === "scheduled" ? "Définissez l'heure d'arrêt et les vérifications actives." : "Choisissez les vérifications actives pour cette session."}
+                    </div>
+                  </div>
+                  {/* step dots */}
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#e2e8f0" }} />
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#0d9488" }} />
+                  </div>
+                </div>
+                <div style={{ padding: "20px 28px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
+                  {/* Stop time picker (scheduled only) */}
+                  {startMode === "scheduled" && (
+                    <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 12, padding: "12px 14px" }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: "#92400e", marginBottom: 8 }}>Heure d'arrêt automatique :</div>
+                      <input
+                        type="time"
+                        value={stopTimeForStart}
+                        onChange={e => setStopTimeForStart(e.target.value)}
+                        style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 12px", fontSize: 14, fontWeight: 600, boxSizing: "border-box" }}
+                      />
+                    </div>
+                  )}
+                  {/* Check toggles */}
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 8 }}>Contrôles qualité actifs :</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {([
+                        { key: "barcode" as const, label: "Code-barres", desc: "Paquets sans code-barres comptés NOK" },
+                        { key: "date" as const, label: "Date", desc: "Paquets sans date lisible comptés NOK" },
+                        { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle des défauts de surface" },
+                      ]).map(({ key, label, desc }) => {
+                        const active = qualiteChecks[key];
+                        return (
+                          <label key={key} onClick={() => setQualiteChecks(prev => ({ ...prev, [key]: !prev[key] }))} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, border: `1px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
+                            <div style={{ width: 18, height: 18, borderRadius: 5, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                              {active && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 13, fontWeight: 700, color: active ? "#0f766e" : "#64748b", lineHeight: 1.3 }}>{label}</div>
+                              <div style={{ fontSize: 11, color: "#94a3b8" }}>{desc}</div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {/* Confirm */}
+                  <button
+                    disabled={
+                      startingSession || schedulingSession ||
+                      (!qualiteChecks.barcode && !qualiteChecks.date && !qualiteChecks.anomaly) ||
+                      (startMode === "scheduled" && !stopTimeForStart)
+                    }
+                    onClick={async () => {
+                      const isScheduled = startMode === "scheduled";
+                      isScheduled ? setSchedulingSession(true) : setStartingSession(true);
+                      try {
+                        const ep: string[] = [];
+                        if (qualiteChecks.barcode || qualiteChecks.date) ep.push("pipeline_barcode_date");
+                        if (qualiteChecks.anomaly) ep.push("pipeline_anomaly");
+                        await backendApi.startAll(undefined, ep, qualiteChecks);
+                        await backendApi.toggleRecording();
+                        if (isScheduled && stopTimeForStart) {
+                          const r = await backendApi.scheduleStop(stopTimeForStart);
+                          setScheduledStop(r.scheduled_stop);
+                          toast.success(`Session démarrée — arrêt automatique ${formatStopCountdown(r.scheduled_stop)}.`);
+                        }
+                        setStartMode(null);
+                        setStopTimeForStart("");
+                      } catch {
+                        toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
+                      } finally {
+                        setStartingSession(false);
+                        setSchedulingSession(false);
+                      }
+                    }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+                      padding: "13px 20px", borderRadius: 12, border: "none",
+                      background: startMode === "scheduled" ? "#b45309" : "linear-gradient(135deg,#0ea5e9,#0d9488)",
+                      color: "#fff", fontSize: 15, fontWeight: 700,
+                      cursor: (startingSession || schedulingSession) ? "wait" : "pointer",
+                      opacity: (startingSession || schedulingSession || (!qualiteChecks.barcode && !qualiteChecks.date && !qualiteChecks.anomaly) || (startMode === "scheduled" && !stopTimeForStart)) ? 0.5 : 1,
+                      transition: "opacity 0.15s",
+                    }}
+                  >
+                    {(startingSession || schedulingSession)
+                      ? <><Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> Démarrage…</>
+                      : <><PlayCircle size={17} /> Confirmer et lancer</>}
+                  </button>
+                </div>
+              </>
+            )}
+
           </div>
         </div>
       )}
@@ -359,12 +424,31 @@ const GMCBQualite = () => {
 
       {/* Session controls row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
-        {/* Session badge */}
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: stats.isRunning ? "#f0fdf4" : "#f8fafc", border: `1px solid ${stats.isRunning ? "#bbf7d0" : "#e2e8f0"}`, borderRadius: 10, padding: "6px 14px", fontSize: 13 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: stats.isRunning ? "#22c55e" : "#94a3b8", display: "inline-block", boxShadow: stats.isRunning ? "0 0 0 3px rgba(34,197,94,0.2)" : "none" }} />
-          <span style={{ fontWeight: 600, color: stats.isRunning ? "#15803d" : "#475569" }}>{stats.isRunning ? "Session active" : "Aucune session active"}</span>
-          {sessionStartTime && <span style={{ color: "#666" }}>• Démarrée à {sessionStartTime}</span>}
-          <span style={{ color: "#666" }}>{dateLabel}</span>
+        {/* Session badge + active modes */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: stats.isRunning ? "#f0fdf4" : "#f8fafc", border: `1px solid ${stats.isRunning ? "#bbf7d0" : "#e2e8f0"}`, borderRadius: 10, padding: "6px 14px", fontSize: 13 }}>
+            <span style={{ width: 8, height: 8, borderRadius: "50%", background: stats.isRunning ? "#22c55e" : "#94a3b8", display: "inline-block", boxShadow: stats.isRunning ? "0 0 0 3px rgba(34,197,94,0.2)" : "none" }} />
+            <span style={{ fontWeight: 600, color: stats.isRunning ? "#15803d" : "#475569" }}>{stats.isRunning ? "Session active" : "Aucune session active"}</span>
+            {sessionStartTime && <span style={{ color: "#666" }}>• Démarrée à {sessionStartTime}</span>}
+            <span style={{ color: "#666" }}>{dateLabel}</span>
+          </div>
+          {stats.isRunning && (
+            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+              {([
+                { key: "barcode" as const, label: "Code-barres" },
+                { key: "date"    as const, label: "Date" },
+                { key: "anomaly" as const, label: "Anomalie" },
+              ]).map(({ key, label }) => {
+                const on = stats.activeChecks[key];
+                return (
+                  <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: on ? "#f0fdf4" : "#f9fafb", border: `1px solid ${on ? "#86efac" : "#e2e8f0"}`, color: on ? "#15803d" : "#94a3b8", borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: on ? "#22c55e" : "#cbd5e1", display: "inline-block" }} />
+                    {on ? "✓ " : ""}{label}
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </div>
         {/* Stop button + auto-stop */}
         {stats.isRunning && (
@@ -470,33 +554,6 @@ const GMCBQualite = () => {
         <StatCard icon={<Timer size={24} color="#9333ea" />} iconBg="#f3e8ff" value={stats.cadence + "/min"} label="Cadence analyse" />
       </div>
 
-      {/* Conformité par heure */}
-      {stats.isRunning && hourlyStats.length > 0 && (
-        <div style={{ marginBottom: 24, padding: 18, borderRadius: 16, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-          <h3 style={{ margin: "0 0 16px 0", fontSize: 16, fontWeight: 700, color: "#0f172a" }}>Conformité par heure</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
-            {hourlyStats.map((hourData: any, idx: number) => (
-              <div key={idx} style={{ padding: 14, borderRadius: 12, background: "#fff", border: "1px solid #e2e8f0", boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase", marginBottom: 8 }}>
-                  {hourData.hour}h
-                </div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 10 }}>
-                  {hourData.conformity_pct?.toFixed(1) ?? "—"}%
-                </div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "#64748b" }}>
-                  <span>Cadence:</span>
-                  <span style={{ fontWeight: 600, color: "#0f172a" }}>{hourData.cadence ?? "—"}</span>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "#dc2626", marginTop: 4 }}>
-                  <span>Anomalies:</span>
-                  <span style={{ fontWeight: 700, color: "#dc2626" }}>{hourData.anomaly_count ?? "—"}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* Live Feed */}
       <div style={{ background: "#0f1923", borderRadius: 16, overflow: "hidden", marginBottom: 24, maxWidth: 720, margin: "0 auto 24px" }}>
         <div style={{ padding: "13px 18px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -511,22 +568,37 @@ const GMCBQualite = () => {
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
             <select
               value={selectedPipeline}
-              onChange={(e) => {
+              onChange={async (e) => {
                 const next = e.target.value;
+                const previous = selectedPipeline;
                 setSelectedPipeline(next);
-                backendApi.switchView(next).catch(() => {});
+                try {
+                  await backendApi.switchView(next);
+                  refreshLiveFeed(false);
+                } catch {
+                  setSelectedPipeline(previous);
+                  toast.error("Impossible de changer la vue live.");
+                }
               }}
               style={{ background: "#1a2733", color: "#fff", border: "1px solid #334155", borderRadius: 6, padding: "4px 8px", fontSize: 12 }}
             >
               {(pipelineOptions.length > 0 ? pipelineOptions : [
-                { id: "pipeline_barcode_date", label: "CAM-FACE-01 — Barcode + Date" },
+                { id: "pipeline_barcode_date", label: "CAM-FACE-01 — Barcode & Date" },
                 { id: "pipeline_anomaly", label: "CAM-HAUT-01 — Anomalie" },
               ]).map((p) => (
                 <option key={p.id} value={p.id}>{p.label}</option>
               ))}
             </select>
             <Settings size={16} color={paramOpen ? "#0ea5e9" : "#aaa"} style={{ cursor: "pointer" }} onClick={() => setParamOpen((v) => !v)} />
-            <Maximize2 size={16} color="#aaa" style={{ cursor: "pointer" }} />
+            <button
+              type="button"
+              onClick={() => refreshLiveFeed()}
+              title="Actualiser le live"
+              aria-label="Actualiser le live"
+              style={{ width: 28, height: 28, borderRadius: 6, border: "1px solid #334155", background: "#1a2733", color: "#aaa", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
+            >
+              <RefreshCw size={14} />
+            </button>
           </div>
         </div>
         {/* Exit-line param panel */}
@@ -560,14 +632,43 @@ const GMCBQualite = () => {
             </button>
           </div>
         )}
-        <div style={{ position: "relative", aspectRatio: "16/9", overflow: "hidden" }}>
-          <img
-            ref={mjpegRef}
-            src={backendApi.videoFeedUrl()}
-            alt="Live feed"
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-            onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }}
-          />
+        <div style={{ position: "relative", aspectRatio: "16/9", overflow: "hidden", background: "#000" }}>
+          {(() => {
+            const activePipeline = selectedPipeline === "pipeline_anomaly" ? stats.p1 : stats.p0;
+            const isNotActivated = !stats.loading && (
+              !(activePipeline?.is_running ?? false) ||
+              (stats.isRunning && !(activePipeline?.stats_active ?? false))
+            );
+            const label = selectedPipeline === "pipeline_anomaly"
+              ? "Détection d'anomalies (CAM-HAUT-01)"
+              : "Contrôle code à barre & date (CAM-FACE-01)";
+            if (isNotActivated) {
+              return (
+                <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: 24, boxSizing: "border-box" }}>
+                  <div style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <Video size={26} color="rgba(255,255,255,0.4)" />
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ color: "rgba(255,255,255,0.85)", fontWeight: 700, fontSize: 15, marginBottom: 6 }}>Mode non activé</div>
+                    <div style={{ color: "rgba(255,255,255,0.4)", fontSize: 13, lineHeight: 1.5 }}>
+                      Activez ce mode depuis le tableau de bord admin.
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <img
+                key={streamRefreshToken}
+                ref={mjpegRef}
+                src={backendApi.videoFeedUrl(streamRefreshToken)}
+                alt="Live feed"
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                onLoad={(e) => { (e.target as HTMLImageElement).style.visibility = "visible"; }}
+                onError={(e) => { (e.target as HTMLImageElement).style.visibility = "hidden"; }}
+              />
+            );
+          })()}
         </div>
         <div style={{ padding: "10px 18px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ color: "#aaa", fontSize: 12 }}>{dateLabel}</span>

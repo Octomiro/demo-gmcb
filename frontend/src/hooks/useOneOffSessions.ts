@@ -4,6 +4,11 @@ import { OneOffSession } from "@/pages/gmcb/gmcbData";
 import { useOneOffBroadcast } from "./useSyncBroadcast";
 
 function backendToOneOff(s: BackendOneOff): OneOffSession {
+  let enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean } | undefined;
+  try {
+    const c = s.enabled_checks ? JSON.parse(s.enabled_checks) : null;
+    if (c && typeof c === "object") enabledChecks = { barcode: c.barcode !== false, date: c.date !== false, anomaly: c.anomaly !== false };
+  } catch { /* use default */ }
   return {
     id: s.id,
     name: s.label,
@@ -12,6 +17,7 @@ function backendToOneOff(s: BackendOneOff): OneOffSession {
     end: s.end_time,
     autoStart: true,
     createdAt: s.created_at,
+    enabledChecks,
   };
 }
 

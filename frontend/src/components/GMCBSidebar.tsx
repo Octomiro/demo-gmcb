@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import logoOctomiro from "@/assets/logo-octomiro.webp";
 import logoOctoNorm from "@/assets/logo-octonorm.webp";
-import logoKhomsa from "@/assets/logo-khomsa.webp";
+import logoKhomsa from "@/assets/logo-khomsa-nobg.webp";
 import { useGMCBAuth } from "@/contexts/GMCBAuthContext";
 import { useGMCBFeedback } from "@/contexts/GMCBFeedbackContext";
 
@@ -183,7 +183,7 @@ export function GMCBSidebar() {
       {open && (
         <div className="px-4 py-3 border-b border-border/50">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-md bg-primary/10 p-1 flex items-center justify-center">
+            <div className="w-20 h-10 flex items-center justify-center">
               <img src={logoKhomsa} alt="Khomsa" className="w-full h-full object-contain" />
             </div>
             <div className="flex flex-col">

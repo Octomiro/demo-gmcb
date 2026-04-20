@@ -30,6 +30,8 @@ data/postgres/
 # ── Logs & reports ──
 backend/perf_snapshots.txt
 backend/*.log
+audit_results/
+backend/test_scripts/
 
 # ── Node / frontend ──
 node_modules/

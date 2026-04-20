@@ -45,6 +45,7 @@ from scheduler import (
 from apscheduler.triggers.cron import CronTrigger
 
 from auth import auth_bp
+from feedback import feedback_bp, run_screenshot_cleanup as _feedback_screenshot_cleanup
 
 _TUNIS_TZ = ZoneInfo("Africa/Tunis")
 
@@ -56,11 +57,17 @@ app.config['JSON_SORT_KEYS'] = False
 CORS(app, resources={r"/api/*": {"origins": "*"},
                      r"/video_feed": {"origins": "*"}})
 app.register_blueprint(auth_bp)
+app.register_blueprint(feedback_bp)
 
 
 # ==========================
 # WEB ROUTES
 # ==========================
+
+@app.route('/api/health')
+def api_health():
+    return jsonify({"status": "ok"})
+
 
 @app.route('/')
 def index():
@@ -380,6 +387,21 @@ def api_session_start():
         pipeline_manager._active_session_group = group_id
         pipeline_manager._active_session_shift_id = shift_id or None
 
+    # Parse enabled_checks from request (default: all enabled)
+    raw_checks = data.get("enabled_checks") or {}
+    enabled_checks = {
+        "barcode": bool(raw_checks.get("barcode", True)),
+        "date":    bool(raw_checks.get("date",    True)),
+        "anomaly": bool(raw_checks.get("anomaly", True)),
+    }
+
+    # Derive which physical pipelines to start
+    enabled_pids = set()
+    if enabled_checks["barcode"] or enabled_checks["date"]:
+        enabled_pids.add("pipeline_barcode_date")
+    if enabled_checks["anomaly"]:
+        enabled_pids.add("pipeline_anomaly")
+
     source_overrides = data.get("sources", {})
     pipeline_results = {}
     for pipe_cfg in PIPELINES:
@@ -387,18 +409,26 @@ def api_session_start():
         st = pipelines.get(pid)
         if st is None:
             continue
+        if pid not in enabled_pids:
+            if st.is_running:
+                st.stop_processing()
+            pipeline_results[pid] = "skipped"
+            continue
         source = source_overrides.get(pid, pipe_cfg["camera_source"])
         if isinstance(source, str) and source.isdigit():
             source = int(source)
+        st.set_enabled_checks(enabled_checks)
         if not st.is_running:
             st.start_processing(source)
-        st.set_stats_recording(True, group_id=group_id, shift_id=shift_id)
+        st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
+                               enabled_checks=enabled_checks)
         pipeline_results[pid] = "started"
 
     return jsonify({
         "status": "started",
         "group_id": group_id,
         "shift_id": shift_id,
+        "enabled_checks": enabled_checks,
         "pipelines": pipeline_results,
     })
 
@@ -576,14 +606,6 @@ def api_stats_session_crossings(session_id):
     if not rows:
         rows = db_writer.list_crossings(session_id, limit=capped)
     return jsonify({"crossings": rows})
-
-
-@app.route('/api/stats/session/<session_id>/hourly')
-def api_stats_session_hourly(session_id):
-    if db_writer is None:
-        return jsonify({"hourly_stats": []})
-    stats = db_writer.get_hourly_stats(session_id)
-    return jsonify({"hourly_stats": stats})
 
 
 @app.route('/api/stats/session/<session_id>', methods=['DELETE'])
@@ -787,6 +809,86 @@ def api_cameras():
     return jsonify({"cameras": CAMERAS})
 
 
+# ── Camera assignment override helpers ───────────────────────────────────────
+_ASSIGNMENTS_FILE = Path(os.environ.get("LIVE_IMAGES_ROOT", "/app/liveImages")).parent / "camera_assignments.json"
+
+def _load_assignments() -> dict:
+    """Return {pipeline_id: camera_source} from the persisted override file."""
+    try:
+        if _ASSIGNMENTS_FILE.exists():
+            return json.loads(_ASSIGNMENTS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_assignments(assignments: dict):
+    _ASSIGNMENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ASSIGNMENTS_FILE.write_text(json.dumps(assignments, indent=2))
+
+def _apply_assignments(assignments: dict):
+    """Patch in-memory PIPELINES list so every code path sees updated sources."""
+    for pipe_cfg in PIPELINES:
+        pid = pipe_cfg["id"]
+        if pid in assignments:
+            pipe_cfg["camera_source"] = assignments[pid]
+
+# Apply persisted overrides immediately at import time
+_apply_assignments(_load_assignments())
+
+@app.route('/api/cameras/assignments', methods=['GET'])
+def api_camera_assignments_get():
+    """Return current pipeline → camera source mapping (with any overrides applied)."""
+    return jsonify({
+        "assignments": {p["id"]: p["camera_source"] for p in PIPELINES}
+    })
+
+@app.route('/api/cameras/assignments', methods=['POST'])
+def api_camera_assignments_set():
+    """Reassign one or more pipelines to different camera sources.
+    Body: { "assignments": { "pipeline_barcode_date": 2, "pipeline_anomaly": 0 } }
+    If a pipeline is currently running it will be restarted on the new camera.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    new_assignments = data.get("assignments", {})
+    if not isinstance(new_assignments, dict) or not new_assignments:
+        return jsonify({"error": "assignments dict required"}), 400
+
+    # Validate pipeline ids
+    valid_pids = {p["id"] for p in PIPELINES}
+    for pid in new_assignments:
+        if pid not in valid_pids:
+            return jsonify({"error": f"Unknown pipeline: {pid}"}), 400
+
+    # Merge with existing persisted assignments and save
+    existing = _load_assignments()
+    existing.update(new_assignments)
+    _save_assignments(existing)
+    _apply_assignments(existing)
+
+    restarted = []
+    for pid, new_src in new_assignments.items():
+        st = pipelines.get(pid)
+        if st is None:
+            continue
+        was_recording = getattr(st, '_stats_active', False)
+        # Restart the pipeline on the new camera source
+        if st.is_running:
+            st.stop_processing()
+        res = st.start_processing(new_src)
+        if res.get("status") == "started":
+            restarted.append(pid)
+        # Re-enable stats recording if it was active
+        if was_recording:
+            group_id = pipeline_manager._active_session_group or ""
+            shift_id = pipeline_manager._active_session_shift_id or ""
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id)
+
+    return jsonify({
+        "assignments": {p["id"]: p["camera_source"] for p in PIPELINES},
+        "restarted": restarted,
+    })
+
+
 @app.route('/api/cameras/detect')
 def api_cameras_detect():
     """Probe /dev/video* devices and report which ones OpenCV can open.
@@ -824,6 +926,8 @@ def api_cameras_detect():
                 "height": s.get("camera_height") or None,
                 "fps":    s.get("reader_fps") or s.get("video_fps") or None,
                 "reader_fps": s.get("reader_fps"),
+                "camera_reconnecting": bool(s.get("camera_reconnecting", False)),
+                "camera_bw_mbps": s.get("camera_bw_mbps"),
             })
             continue
 
@@ -850,7 +954,25 @@ def api_cameras_detect():
             "height": height,
             "fps": round(fps, 1) if fps is not None else None,
             "reader_fps": None,
+            "camera_reconnecting": False,
         })
+
+    # Cameras that are actively retrying but whose /dev/video* node has disappeared
+    seen_indices = {r["index"] for r in results}
+    for idx, s in active_cam_stats.items():
+        if idx not in seen_indices and s.get("camera_reconnecting"):
+            results.append({
+                "device": f"/dev/video{idx}",
+                "index": idx,
+                "available": False,
+                "in_use": True,
+                "width": s.get("camera_width") or None,
+                "height": s.get("camera_height") or None,
+                "fps": None,
+                "reader_fps": None,
+                "camera_reconnecting": True,
+                "camera_bw_mbps": None,
+            })
 
     pipeline_sources = {pid: cfg["camera_source"] for pid, cfg in
                         [(p["id"], p) for p in __import__("tracking_config").PIPELINES]}
@@ -976,6 +1098,7 @@ def api_pipeline_stats(pipeline_id):
         s["db_connected"] = h["db"] == "ok"
     else:
         s["db_connected"] = False
+    s["enabled_checks"] = getattr(st, '_enabled_checks', {"barcode": True, "date": True, "anomaly": True})
     return jsonify(s)
 
 
@@ -1140,6 +1263,13 @@ def api_shifts_create():
     enabled_pipelines = data.get("enabled_pipelines", [p["id"] for p in PIPELINES])
     if not isinstance(enabled_pipelines, list) or len(enabled_pipelines) == 0:
         enabled_pipelines = [p["id"] for p in PIPELINES]
+    # enabled_checks: per-class toggles (barcode/date/anomaly)
+    raw_ec = data.get("enabled_checks") or {}
+    enabled_checks = {
+        "barcode": bool(raw_ec.get("barcode", True)),
+        "date":    bool(raw_ec.get("date",    True)),
+        "anomaly": bool(raw_ec.get("anomaly", True)),
+    }
     existing = db_writer.get_all_shifts()
     new_days = set(d.lower() for d in days_of_week)
     for s in existing:
@@ -1185,6 +1315,7 @@ def api_shifts_create():
         "camera_source": camera_source,
         "checkpoint_id": checkpoint_id,
         "enabled_pipelines": json.dumps(enabled_pipelines),
+        "enabled_checks": json.dumps(enabled_checks),
         "active": 1,
         "created_at": datetime.now(_TUNIS_TZ).replace(tzinfo=None).strftime('%Y-%m-%dT%H:%M:%S'),
     }
@@ -1246,6 +1377,14 @@ def api_shifts_update(shift_id):
         ep = data["enabled_pipelines"]
         if isinstance(ep, list) and len(ep) > 0:
             fields["enabled_pipelines"] = json.dumps(ep)
+    if "enabled_checks" in data:
+        raw_ec = data["enabled_checks"]
+        if isinstance(raw_ec, dict):
+            fields["enabled_checks"] = json.dumps({
+                "barcode": bool(raw_ec.get("barcode", True)),
+                "date":    bool(raw_ec.get("date",    True)),
+                "anomaly": bool(raw_ec.get("anomaly", True)),
+            })
     if not fields:
         return jsonify({"error": "no valid fields to update"}), 400
     ok = db_writer.update_shift(shift_id, fields)
@@ -1449,6 +1588,14 @@ def api_one_off_create():
             }), 409
 
     import datetime as _dt
+    # Parse enabled_checks for one-off session
+    raw_ec = data.get("enabled_checks") or {}
+    enabled_checks = {
+        "barcode": bool(raw_ec.get("barcode", True)),
+        "date":    bool(raw_ec.get("date",    True)),
+        "anomaly": bool(raw_ec.get("anomaly", True)),
+    }
+
     session = {
         "id": str(uuid.uuid4()),
         "label": label,
@@ -1457,6 +1604,7 @@ def api_one_off_create():
         "end_time": end_time,
         "camera_source": data.get("camera_source", "0"),
         "checkpoint_id": data.get("checkpoint_id", "tracking"),
+        "enabled_checks": json.dumps(enabled_checks),
         "created_at": _dt.datetime.now(_TUNIS_TZ).replace(tzinfo=None).isoformat(),
     }
     result = db_writer.insert_one_off_session(session)
@@ -1468,6 +1616,7 @@ def api_one_off_create():
         "id": session["id"], "label": label, "type": "one_off",
         "start_time": start_time, "end_time": end_time,
         "session_date": date, "active": 1,
+        "enabled_checks": json.dumps(enabled_checks),
     })
     return jsonify({"session": result}), 201
 
@@ -1515,8 +1664,14 @@ def api_one_off_delete(session_id):
 # MAIN
 # ==========================
 
+_shutdown_done = False
+
 def _shutdown():
     """Graceful shutdown: close sessions and stop pipelines."""
+    global _shutdown_done
+    if _shutdown_done:
+        return
+    _shutdown_done = True
     for pid, st in _all_states():
         try:
             if getattr(st, '_stats_active', False):
@@ -1541,11 +1696,17 @@ def _shutdown():
             db_writer.stop()
     except Exception:
         pass
+    print("[SHUTDOWN] Cleanup complete.")
+
+
+def _signal_shutdown(sig, frame):
+    _shutdown()
+    os._exit(0)  # skip interpreter teardown to avoid CUDA C++ destructor crash
 
 
 atexit.register(_shutdown)
 for _sig in (signal.SIGTERM, signal.SIGINT):
-    signal.signal(_sig, lambda s, f: (_shutdown(), exit(0)))
+    signal.signal(_sig, _signal_shutdown)
 
 
 if __name__ == '__main__':
@@ -1557,9 +1718,8 @@ if __name__ == '__main__':
         CronTrigger(hour=3, minute=0, timezone="Africa/Tunis"),
         id="cleanup_proof_images", replace_existing=True,
     )
-    from auth import run_screenshot_cleanup
     scheduler.add_job(
-        run_screenshot_cleanup,
+        _feedback_screenshot_cleanup,
         CronTrigger(hour=3, minute=30, timezone="Africa/Tunis"),
         id="cleanup_screenshots", replace_existing=True,
     )

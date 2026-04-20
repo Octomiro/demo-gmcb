@@ -200,6 +200,24 @@ def _shift_start(shift_id):
     except Exception:
         enabled_pids = {p["id"] for p in PIPELINES}
 
+    # Parse per-class enabled_checks from shift config
+    _ec_raw = shift.get("enabled_checks")
+    try:
+        enabled_checks = _json.loads(_ec_raw) if _ec_raw else {"barcode": True, "date": True, "anomaly": True}
+    except Exception:
+        enabled_checks = {"barcode": True, "date": True, "anomaly": True}
+    enabled_checks = {
+        "barcode": bool(enabled_checks.get("barcode", True)),
+        "date":    bool(enabled_checks.get("date",    True)),
+        "anomaly": bool(enabled_checks.get("anomaly", True)),
+    }
+
+    # Override enabled_pids based on enabled_checks:
+    # if anomaly is off → skip anomaly pipeline even if enabled_pipelines includes it
+    if not enabled_checks["anomaly"]:
+        enabled_pids.discard("pipeline_anomaly")
+    # if both barcode and date are off, still keep tracking pipeline for counting
+
     for pipe_cfg in PIPELINES:
         pid = pipe_cfg["id"]
         st = pipelines.get(pid)
@@ -223,15 +241,18 @@ def _shift_start(shift_id):
                 pipeline_checkpoint_ids[pid] = cp_id
                 print(f"[SCHEDULER][{pid}] Checkpoint switched to {cp_id}: {result.get('status')}")
 
+        st.set_enabled_checks(enabled_checks)
+
         if not st.is_running:
             st.start_processing(cam_src)
             print(f"[SCHEDULER][{pid}] Started on camera {cam_src}")
 
         if not getattr(st, '_stats_active', False):
-            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id)
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
+                                   enabled_checks=enabled_checks)
             print(f"[SCHEDULER][{pid}] Stats recording started (group {group_id[:8]}…)")
 
-    print(f"[SCHEDULER] Shift '{label}' started automatically — pipelines active: {sorted(enabled_pids)}")
+    print(f"[SCHEDULER] Shift '{label}' started automatically — pipelines active: {sorted(enabled_pids)} — checks: {enabled_checks}")
 
 
 def _shift_stop(shift_id):
