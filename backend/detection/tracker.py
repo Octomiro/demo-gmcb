@@ -212,7 +212,14 @@ class TrackerMixin:
                     self.packet_numbers[tid] = self.total_packets
                     has_bc = pkg["barcode_detected"]
                     has_dt = pkg.get("date_detected", False)
-                    final = "OK" if (has_bc and (has_dt or not require_date_for_ok)) else "NOK"
+                    # Apply per-session enabled_checks:
+                    # if barcode check disabled → treat as if barcode present
+                    # if date check disabled → treat as if date present (or not required)
+                    checks = getattr(self, '_enabled_checks', {"barcode": True, "date": True, "anomaly": True})
+                    effective_bc = has_bc or not checks.get("barcode", True)
+                    effective_dt = has_dt or not checks.get("date", True)
+                    effective_require_date = require_date_for_ok and checks.get("date", True)
+                    final = "OK" if (effective_bc and (effective_dt or not effective_require_date)) else "NOK"
                     pkg["decision_locked"] = True
                     pkg["final_decision"] = final
                     self.output_fifo.append(final)
@@ -223,9 +230,9 @@ class TrackerMixin:
 
                     # Save proof image for defective packets
                     if final == "NOK":
-                        if not has_bc:
+                        if not has_bc and checks.get("barcode", True):
                             defect_type = "nobarcode"
-                        elif require_date_for_ok and not has_dt:
+                        elif effective_require_date and not has_dt:
                             defect_type = "nodate"
                         else:
                             defect_type = "nobarcode"
@@ -236,9 +243,9 @@ class TrackerMixin:
                     # DB/session accounting is fully isolated: when
                     # recording is OFF, detection path does no DB work.
                     if self._stats_active:
-                        if not has_bc:
+                        if not has_bc and checks.get("barcode", True):
                             self._nok_no_barcode += 1
-                        elif require_date_for_ok and not has_dt:
+                        elif effective_require_date and not has_dt:
                             self._nok_no_date += 1
 
                         if (
@@ -261,11 +268,12 @@ class TrackerMixin:
 
                         # Record defective packet with timestamp for ejection
                         if final == "NOK":
-                            defect_type_db = "nobarcode"
-                            if not has_bc:
+                            if not has_bc and checks.get("barcode", True):
                                 defect_type_db = "nobarcode"
-                            elif require_date_for_ok and not has_dt:
+                            elif effective_require_date and not has_dt:
                                 defect_type_db = "nodate"
+                            else:
+                                defect_type_db = "nobarcode"
                             try:
                                 from datetime import datetime
                                 self._db_writer.write_queue.put_nowait({

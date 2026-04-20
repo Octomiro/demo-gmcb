@@ -1,8 +1,7 @@
 export const PRODUCTION_CADENCE = 75;
 
-/** Direct backend host for resources that bypass the Vite proxy (e.g. MJPEG). */
-const BACKEND_HOST =
-  import.meta.env.VITE_BACKEND_HOST ?? "http://127.0.0.1:5000";
+/** Use empty string so MJPEG video feed goes through nginx (works from any client machine). */
+const BACKEND_HOST = "";
 
 const BASE = "/api";
 const REQUEST_TIMEOUT_MS = 8_000; // 8 s — abort hanging requests so they don't pile up
@@ -43,6 +42,7 @@ export interface BackendShift {
   days_of_week: string;    // JSON string e.g. '["mon","tue"]'
   camera_source: string;
   checkpoint_id: string;
+  enabled_pipelines?: string;  // JSON string e.g. '["pipeline_barcode_date"]'
   active: number;          // 1 | 0
   created_at: string;
   variants?: BackendVariant[];
@@ -57,6 +57,7 @@ export interface CreateShiftPayload {
   days_of_week: string[];  // plain array — backend serialises to JSON
   camera_source?: string;
   checkpoint_id?: string;
+  enabled_pipelines?: string[];  // e.g. ["pipeline_barcode_date", "pipeline_anomaly"]
 }
 
 export interface UpdateShiftPayload {
@@ -68,6 +69,7 @@ export interface UpdateShiftPayload {
   days_of_week?: string[];
   camera_source?: string;
   checkpoint_id?: string;
+  enabled_pipelines?: string[];
 }
 
 // ─── Shift variant types (backend wire format) ────────────────────────────────
@@ -210,8 +212,12 @@ export const pipelinesApi = {
     return request("POST", `/pipelines/${pipelineId}/stop`);
   },
 
-  startAll(sources?: Record<string, string | number>) {
-    return request("POST", "/start", sources ? { sources } : undefined);
+  startAll(sources?: Record<string, string | number>, enabledPipelines?: string[], enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean }) {
+    const body: Record<string, unknown> = {};
+    if (sources) body.sources = sources;
+    if (enabledPipelines) body.enabled_pipelines = enabledPipelines;
+    if (enabledChecks) body.enabled_checks = enabledChecks;
+    return request("POST", "/start", Object.keys(body).length ? body : undefined);
   },
 
   stopAll() {
@@ -366,14 +372,23 @@ export const backendApi = {
   // Switch active video feed
   switchView: (pipelineId: string) => pipelinesApi.setView(pipelineId),
 
-  // Video feed URL — direct to Flask backend (bypasses Vite proxy for lower latency)
-  videoFeedUrl: () => `/video_feed`,
+  // Video feed URL — proxied through nginx so it works from any client machine
+  videoFeedUrl: () => `/video_feed?fps=25`,
 
   // Camera config (from tracking_config) + live device probe
   listCameras: (): Promise<{ cameras: Array<{ id: string; label: string; source: number | string }> }> =>
     request("GET", "/cameras"),
   detectCameras: (): Promise<{
-    detected: Array<{ device: string; index: number; available: boolean; width: number | null; height: number | null; fps: number | null }>;
+    detected: Array<{
+      device: string;
+      index: number;
+      available: boolean;
+      in_use: boolean;
+      width: number | null;
+      height: number | null;
+      fps: number | null;
+      reader_fps: number | null;
+    }>;
     pipeline_sources: Record<string, number | string>;
   }> => request("GET", "/cameras/detect"),
 
@@ -397,7 +412,7 @@ export const backendApi = {
     `${BASE}/proof/${sessionId}/${defectType}/${packetNum}`,
 
   // Manual session control
-  startAll: () => pipelinesApi.startAll(),
+  startAll: (sources?: Record<string, string | number>, enabledPipelines?: string[], enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean }) => pipelinesApi.startAll(sources, enabledPipelines, enabledChecks),
   stopAll: () => pipelinesApi.stopAll(),
   toggleRecording: () => statsApi.toggle(),
   prewarm: () => pipelinesApi.prewarm(),

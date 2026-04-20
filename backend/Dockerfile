@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libturbojpeg0 \
     v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,8 +17,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir \
-    --extra-index-url https://download.pytorch.org/whl/cu130 \
-    --extra-index-url https://pypi.nvidia.com \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
     -r requirements.txt
 
 COPY . .

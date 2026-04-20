@@ -42,6 +42,10 @@ function backendToRule(s: BackendShift): RecurringRule {
     startDate: s.start_date ?? todayIso(),
     endDate: s.end_date ?? addDays(todayIso(), 365),
     weekdays,
+    enabledPipelines: (() => {
+      try { const p = JSON.parse(s.enabled_pipelines ?? ''); return Array.isArray(p) ? p : ["pipeline_barcode_date", "pipeline_anomaly"]; }
+      catch { return ["pipeline_barcode_date", "pipeline_anomaly"]; }
+    })(),
     autoStart: true,
     active: s.active === 1,
     variants: (s.variants ?? []).map(backendVariantToRuleVariant),
@@ -60,6 +64,7 @@ function ruleDraftToPayload(draft: {
   weekdays: string[];
   camera_source?: string;
   checkpoint_id?: string;
+  enabledPipelines?: string[];
 }): CreateShiftPayload {
   return {
     label: draft.name,
@@ -70,6 +75,7 @@ function ruleDraftToPayload(draft: {
     days_of_week: draft.weekdays,
     ...(draft.camera_source !== undefined && { camera_source: draft.camera_source }),
     ...(draft.checkpoint_id !== undefined && { checkpoint_id: draft.checkpoint_id }),
+    ...(draft.enabledPipelines !== undefined && { enabled_pipelines: draft.enabledPipelines }),
   };
 }
 
@@ -93,11 +99,11 @@ export interface UseShiftsReturn {
   error: ShiftSaveError;
   createShift: (draft: {
     name: string; start: string; end: string; startDate?: string; endDate?: string; weekdays: string[];
-    camera_source?: string; checkpoint_id?: string;
+    camera_source?: string; checkpoint_id?: string; enabledPipelines?: string[];
   }) => Promise<RecurringRule>;
   updateShift: (
     id: string,
-    fields: Partial<{ name: string; start: string; end: string; startDate: string; endDate: string; weekdays: string[]; camera_source?: string; checkpoint_id?: string; }>
+    fields: Partial<{ name: string; start: string; end: string; startDate: string; endDate: string; weekdays: string[]; camera_source?: string; checkpoint_id?: string; enabledPipelines?: string[]; }>
   ) => Promise<RecurringRule>;
   deleteShift: (id: string) => Promise<void>;
   toggleShift: (id: string) => Promise<boolean>;
@@ -176,7 +182,7 @@ export function useShifts(): UseShiftsReturn {
 
   const updateShift = useCallback(async (id: string, fields: Partial<{
     name: string; start: string; end: string; startDate: string; endDate: string; weekdays: string[];
-    camera_source?: string; checkpoint_id?: string;
+    camera_source?: string; checkpoint_id?: string; enabledPipelines?: string[];
   }>) => {
     const payload: UpdateShiftPayload = {
       ...(fields.name !== undefined && { label: fields.name }),
@@ -187,6 +193,7 @@ export function useShifts(): UseShiftsReturn {
       ...(fields.weekdays !== undefined && { days_of_week: fields.weekdays }),
       ...(fields.camera_source !== undefined && { camera_source: fields.camera_source }),
       ...(fields.checkpoint_id !== undefined && { checkpoint_id: fields.checkpoint_id }),
+      ...(fields.enabledPipelines !== undefined && { enabled_pipelines: fields.enabledPipelines }),
     };
     mutating.current = true;
     try {

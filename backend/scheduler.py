@@ -192,10 +192,25 @@ def _shift_start(shift_id):
         pipeline_manager._active_session_group = group_id
         pipeline_manager._active_session_shift_id = shift_id
 
+    # Determine which pipelines this shift enables
+    _ep_raw = shift.get("enabled_pipelines")
+    try:
+        import json as _json
+        enabled_pids = set(_json.loads(_ep_raw)) if _ep_raw else {p["id"] for p in PIPELINES}
+    except Exception:
+        enabled_pids = {p["id"] for p in PIPELINES}
+
     for pipe_cfg in PIPELINES:
         pid = pipe_cfg["id"]
         st = pipelines.get(pid)
         if st is None:
+            continue
+
+        if pid not in enabled_pids:
+            # Pipeline disabled for this shift — stop if running
+            if st.is_running:
+                st.stop_processing()
+                print(f"[SCHEDULER][{pid}] Stopped — disabled for shift '{label}'")
             continue
 
         cam_src = pipe_cfg["camera_source"]
@@ -216,7 +231,7 @@ def _shift_start(shift_id):
             st.set_stats_recording(True, group_id=group_id, shift_id=shift_id)
             print(f"[SCHEDULER][{pid}] Stats recording started (group {group_id[:8]}…)")
 
-    print(f"[SCHEDULER] Shift '{label}' started automatically — all pipelines active")
+    print(f"[SCHEDULER] Shift '{label}' started automatically — pipelines active: {sorted(enabled_pids)}")
 
 
 def _shift_stop(shift_id):

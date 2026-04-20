@@ -1,8 +1,32 @@
 import time
 
 import cv2
+import numpy as np
 
 from tracking_config import JPEG_QUALITY
+
+# ── JPEG encoder selection ───────────────────────────────────────────────────
+# TurboJPEG (libjpeg-turbo SIMD) releases the GIL → true parallelism.
+# GPU nvJPEG is slower in practice because frames live in CPU memory and the
+# CPU→GPU→CPU round-trip per frame costs more than the encode itself.
+try:
+    from turbojpeg import TurboJPEG
+    _tjpeg = TurboJPEG()
+    _ENCODER = "turbojpeg"
+    print("[COMPOSITOR] Using TurboJPEG (libjpeg-turbo SIMD) — GIL-free encoding")
+except Exception:
+    _tjpeg = None
+    _ENCODER = "cv2"
+    print("[COMPOSITOR] TurboJPEG not available — falling back to cv2.imencode")
+
+
+def _encode_jpeg(frame_bgr, quality):
+    """Encode BGR numpy frame to JPEG bytes using best available encoder."""
+    if _ENCODER == "turbojpeg":
+        return _tjpeg.encode(frame_bgr, quality=quality)
+    else:
+        ret, buf = cv2.imencode('.jpg', frame_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return buf.tobytes() if ret else None
 
 
 class CompositorMixin:
@@ -17,14 +41,14 @@ class CompositorMixin:
         Continuously composites raw frame + detection overlay and
         pre-encodes to JPEG bytes. The MJPEG feed just yields these
         bytes instantly — zero computation in the request handler.
-        Runs at native video FPS, woken by _raw_changed event.
+        Runs at native camera FPS. Uses TurboJPEG (libjpeg-turbo)
+        which releases the GIL → true parallel encoding across threads.
         """
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
         print("[COMPOSITOR] Started")
 
         try:
             while self.is_running:
-                loop_t0 = time.time()
+                loop_t0 = time.monotonic()
                 # Block until reader produces a new frame (or timeout)
                 got = self._raw_changed.wait(timeout=0.1)
                 if not self.is_running:
@@ -53,25 +77,12 @@ class CompositorMixin:
                     ov_det_ms    = self._overlay.get('det_ms', 0)
                     ov_ad_zones  = self._overlay.get('ad_zone_lines', None)
 
-                # If available, draw overlay on the exact raw frame used by
-                # detector to avoid apparent bbox shift on moving conveyor.
-                if ov_frame_idx > 0:
-                    matched = None
-                    with self._raw_history_lock:
-                        for idx, f in reversed(self._raw_history):
-                            if idx == ov_frame_idx:
-                                matched = f
-                                break
-                            if idx < ov_frame_idx:
-                                break
-                    if matched is not None:
-                        frame = matched.copy()
-                        h, w = frame.shape[:2]
-                        with self._perf_lock:
-                            self._perf["compositor_sync_hits"] += 1
-                    else:
-                        with self._perf_lock:
-                            self._perf["compositor_sync_misses"] += 1
+                # Always display the LATEST raw frame to keep the stream real-time.
+                # Overlays from the last YOLO result are drawn on top; bboxes may
+                # drift by ~1 frame on a fast-moving conveyor but this eliminates
+                # the full YOLO inference time (~30-80ms) from display latency.
+                with self._perf_lock:
+                    self._perf["compositor_sync_hits"] += 1
 
                 # ── Exit line: use dedicated attribute (set once by detector, updated live) ──
                 # Fall back to frame-based estimate only until detector computes it
@@ -138,25 +149,40 @@ class CompositorMixin:
                                 f"YOLO: {ov_det_ms:.0f}ms | ~{ov_det_fps:.0f}fps",
                                 (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
+                # Live reader FPS on the stream overlay
+                with self._stats_lock:
+                    _rfps = self.stats.get("reader_fps", 0)
+                if _rfps > 0:
+                    rfps_color = (0, 255, 0) if _rfps >= 28 else (0, 200, 255) if _rfps >= 20 else (0, 0, 255)
+                    cv2.putText(frame,
+                                f"Reader: {_rfps:.1f}fps",
+                                (10, h - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, rfps_color, 1)
+
                 cv2.putText(frame, f"Frame: {self.frame_count}",
                             (w - 180, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
 
                 # ── Encode to JPEG once (reused by all browser clients) ──
-                ret, buf = cv2.imencode('.jpg', frame, encode_params)
-                if ret:
-                    full_bytes = buf.tobytes()
-                    # Low-bandwidth version: half resolution, quality 40
+                # TurboJPEG (libjpeg-turbo SIMD) releases GIL → parallel.
+                full_bytes = _encode_jpeg(frame, JPEG_QUALITY)
+                low_bytes = None
+                if getattr(self, '_low_clients_count', 0) > 0:
                     low_frame = cv2.resize(frame, None, fx=0.5, fy=0.5,
                                            interpolation=cv2.INTER_AREA)
-                    ret_low, buf_low = cv2.imencode(
-                        '.jpg', low_frame, [cv2.IMWRITE_JPEG_QUALITY, 40])
-                    low_bytes = buf_low.tobytes() if ret_low else full_bytes
+                    low_bytes = _encode_jpeg(low_frame, 40)
+
+                if full_bytes is not None:
                     with self._jpeg_lock:
                         self._jpeg_bytes = full_bytes
-                        self._jpeg_bytes_low = low_bytes
+                        if low_bytes is not None:
+                            self._jpeg_bytes_low = low_bytes
+                        elif self._jpeg_bytes_low is None:
+                            self._jpeg_bytes_low = full_bytes
+                        self._jpeg_seq += 1
+                    # Wake any video_feed generators waiting for a new frame
+                    self._jpeg_event.set()
 
                 with self._perf_lock:
-                    self._perf["compositor_loop_ms"] = round((time.time() - loop_t0) * 1000, 2)
+                    self._perf["compositor_loop_ms"] = round((time.monotonic() - loop_t0) * 1000, 2)
 
         except Exception as e:
             print(f"[COMPOSITOR] Error: {e}")
