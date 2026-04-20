@@ -36,6 +36,10 @@ scheduler = BackgroundScheduler(
 _preemption_lock = threading.Lock()
 _preemption_event = None  # dict or None: {"shift_label": ..., "timestamp": ..., "old_group_id": ...}
 
+# ── Camera-failure event — consumed by frontend via /api/session/status ──
+_camera_failure_lock = threading.Lock()
+_camera_failure_event = None  # dict or None: {"shift_label": ..., "timestamp": ..., "pipelines": [...]}
+
 
 def _check_shift_variants(shift_id, today_str):
     """Check shift variants for today's date.
@@ -251,6 +255,31 @@ def _shift_start(shift_id):
             st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
                                    enabled_checks=enabled_checks)
             print(f"[SCHEDULER][{pid}] Stats recording started (group {group_id[:8]}…)")
+
+    # Wait for reader threads to attempt camera open, then detect failures.
+    time.sleep(0.8)
+    failed_pids = []
+    for pipe_cfg in PIPELINES:
+        pid = pipe_cfg["id"]
+        st = pipelines.get(pid)
+        if st is None or pid not in enabled_pids:
+            continue
+        if not st.is_running and getattr(st, "_camera_error", None) == "camera_unavailable":
+            failed_pids.append(pid)
+            print(f"[SCHEDULER][{pid}] Camera unavailable — recording failure in DB")
+            # The session was opened by set_stats_recording; close it as failed.
+            if getattr(st, "_stats_active", False):
+                st.set_stats_recording(False, end_reason="camera_unavailable")
+
+    if failed_pids:
+        global _camera_failure_event
+        with _camera_failure_lock:
+            _camera_failure_event = {
+                "shift_label": label,
+                "timestamp": datetime.now(_TUNIS_TZ).isoformat(),
+                "pipelines": failed_pids,
+            }
+        print(f"[SCHEDULER] Shift '{label}' — camera failure on pipelines: {failed_pids}")
 
     print(f"[SCHEDULER] Shift '{label}' started automatically — pipelines active: {sorted(enabled_pids)} — checks: {enabled_checks}")
 

@@ -87,6 +87,7 @@ export interface BackendVariant {
   start_date: string;
   end_date: string;
   days_of_week: string;  // JSON string '["mon"]'
+  enabled_checks?: string; // optional JSON override e.g. '{"barcode":true,"date":false,"anomaly":true}'
   created_at: string;
 }
 
@@ -98,6 +99,7 @@ export interface CreateVariantPayload {
   start_date: string;
   end_date: string;
   days_of_week: string[];
+  enabled_checks?: { barcode: boolean; date: boolean; anomaly: boolean };
 }
 
 // ─── Shifts endpoints ─────────────────────────────────────────────────────────
@@ -265,6 +267,133 @@ export const statsApi = {
   },
 };
 
+// ─── Reports endpoints ────────────────────────────────────────────────────────
+
+export interface ReportActiveMode {
+  key: "barcode" | "date" | "anomaly";
+  label: string;
+  color: string;
+  session_count: number;
+  session_share_pct: number;
+  duration_minutes: number;
+  hours: number;
+  hours_share_pct: number;
+  active: boolean;
+}
+
+export interface ReportAnomalyType {
+  key: string;
+  label: string;
+  color: string;
+  count: number;
+  rate_pct: number;
+  share_pct: number;
+}
+
+export interface ReportDaySummary {
+  date: string;
+  date_label: string;
+  session_count: number;
+  total_packets: number;
+  ok_count: number;
+  total_anomalies: number;
+  duration_minutes: number;
+  worked_hours: number;
+  worked_hours_label: string;
+  conformity_rate_pct: number;
+  anomaly_rate_pct: number;
+  nok_no_barcode: number;
+  nok_no_date: number;
+  nok_anomaly: number;
+  modes_active: string[];
+}
+
+export interface ReportSessionSummary {
+  id: string;
+  date: string;
+  date_label: string;
+  start_time: string;
+  end_time: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_minutes: number;
+  duration_label: string;
+  total_packets: number;
+  ok_count: number;
+  total_anomalies: number;
+  nok_no_barcode: number;
+  nok_no_date: number;
+  nok_anomaly: number;
+  conformity_rate_pct: number;
+  anomaly_rate_pct: number;
+  enabled_checks: { barcode: boolean; date: boolean; anomaly: boolean };
+  mode_labels: string[];
+  mode_combo_label: string;
+  end_reason?: string | null;
+}
+
+export interface ReportSummary {
+  start_date: string;
+  end_date: string;
+  period_label: string;
+  report_kind: "daily" | "range";
+  generated_at: string;
+  total_days: number;
+  session_count: number;
+  average_sessions_per_day: number;
+  duration_minutes: number;
+  total_hours: number;
+  total_hours_label: string;
+  average_hours_per_day: number;
+  total_packets: number;
+  total_conformes: number;
+  total_anomalies: number;
+  conformity_rate_pct: number;
+  anomaly_rate_pct: number;
+  active_modes: ReportActiveMode[];
+  active_mode_labels: string[];
+  mode_combinations: Array<{ label: string; count: number; share_pct: number }>;
+  anomalies_by_type: ReportAnomalyType[];
+  days: ReportDaySummary[];
+  sessions: ReportSessionSummary[];
+}
+
+function buildReportQuery(startDate: string, endDate: string) {
+  const params = new URLSearchParams({
+    start_date: startDate,
+    end_date: endDate,
+  });
+  return params.toString();
+}
+
+export const reportsApi = {
+  summary(startDate: string, endDate: string): Promise<ReportSummary> {
+    return request("GET", `/reports/summary?${buildReportQuery(startDate, endDate)}`);
+  },
+
+  async download(startDate: string, endDate: string): Promise<{ blob: Blob; filename: string }> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS * 2);
+    try {
+      const res = await fetch(`${BASE}/reports/pdf?${buildReportQuery(startDate, endDate)}`, {
+        method: "GET",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`GET /reports/pdf → ${res.status}: ${text}`);
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("Content-Disposition") ?? "";
+      const match = disposition.match(/filename="?([^";]+)"?/i);
+      const filename = match?.[1] ?? `rapport_gmcb_${startDate}${startDate === endDate ? "" : `_${endDate}`}.pdf`;
+      return { blob, filename };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+};
+
 // ─── Pipeline stats ───────────────────────────────────────────────────────────
 
 export const pipelineStatsApi = {
@@ -408,6 +537,19 @@ export const backendApi = {
 
   // Session history
   getSessions: (limit = 100) => statsApi.sessions(limit),
+  getReportSummary: (startDate: string, endDate: string) => reportsApi.summary(startDate, endDate),
+  downloadReportPdf: async (startDate: string, endDate: string) => {
+    const { blob, filename } = await reportsApi.download(startDate, endDate);
+    const href = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(href), 1000);
+    return { filename };
+  },
 
   // Single session
   getSession: (id: string) => statsApi.getSession(id),
@@ -423,10 +565,17 @@ export const backendApi = {
   startAll: (sources?: Record<string, string | number>, enabledPipelines?: string[], enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean }) => pipelinesApi.startAll(sources, enabledPipelines, enabledChecks),
   stopAll: () => pipelinesApi.stopAll(),
   toggleRecording: () => statsApi.toggle(),
+  sessionStart: (enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean }, shiftId?: string) =>
+    request<{ status: string; group_id: string; shift_id: string; enabled_checks: Record<string, boolean>; pipelines: Record<string, string> }>(
+      "POST", "/session/start", { enabled_checks: enabledChecks, ...(shiftId ? { shift_id: shiftId } : {}) }
+    ),
+  sessionStop: () => request<{ status: string; group_id: string; pipelines: Record<string, string> }>("POST", "/session/stop"),
   prewarm: () => pipelinesApi.prewarm(),
   prewarmStatus: () => pipelinesApi.prewarmStatus(),
   resetSessionGuard: () => request<{ reset: boolean; previous_source: string | null }>("POST", "/session/reset-guard"),
-  sessionStatus: () => request<{ active: boolean; source: string | null; guard_stale: boolean; any_running: boolean; any_recording: boolean }>("GET", "/session/status"),
+  sessionStatus: () => request<{ active: boolean; source: string | null; guard_stale: boolean; any_running: boolean; any_recording: boolean; enabled_checks: { barcode: boolean; date: boolean; anomaly: boolean } | null; camera_failure: { shift_label: string; timestamp: string; pipelines: string[] } | null }>("GET", "/session/status"),
+  updateSessionChecks: (enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean }) =>
+    request<{ status: string; group_id: string; old_checks: Record<string, boolean>; new_checks: Record<string, boolean> }>("POST", "/session/checks", { enabled_checks: enabledChecks }),
 
   // Auto-stop scheduling
   scheduleStop: (stopAt: string | null) => request<{ scheduled_stop: string | null }>("POST", "/session/schedule-stop", { stop_at: stopAt }),

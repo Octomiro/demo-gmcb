@@ -414,17 +414,18 @@ class AnomalyMixin:
                     self.packets_crossed_line.add(tid)
                     self.total_packets += 1
                     self.packet_numbers[tid] = self.total_packets
-                    final = "NOK" if is_def else "OK"
+                    anomaly_enabled = getattr(self, '_enabled_checks', {}).get("anomaly", True)
+                    final = "NOK" if (is_def and anomaly_enabled) else "OK"
                     self.output_fifo.append(final)
                     if final == "OK":
                         self._ok_count += 1
                     else:
                         self._nok_count += 1
 
-                    if self._stats_active and is_def:
+                    if self._stats_active and is_def and anomaly_enabled:
                         self._nok_anomaly += 1
 
-                    if is_def:
+                    if is_def and anomaly_enabled:
                         import logging as _logging
                         _logging.getLogger(__name__).debug(
                             "[AD] Packet #%d -> NOK (scans=%d)",
@@ -457,7 +458,7 @@ class AnomalyMixin:
                                 if self._db_writer:
                                     self._db_writer.log_dropped("session_update")
                         # Record defective packet with timestamp for ejection
-                        if is_def:
+                        if is_def and anomaly_enabled:
                             try:
                                 from datetime import datetime
                                 self._db_writer.write_queue.put_nowait({

@@ -4,7 +4,7 @@ import {
   ScanLine, CheckCircle2, AlertCircle, Camera, Timer, Video,
   RefreshCw, Settings, Filter, ChevronRight, Eye, X,
   SlidersHorizontal, RotateCw, ArrowLeftRight, PlayCircle, LayoutDashboard, ArrowLeft,
-  Loader2, Square, Clock,
+  Loader2, Square, Clock, CalendarDays,
 } from "lucide-react";
 import logoOctoNorm from "@/assets/logo-octonorm.webp";
 import {
@@ -17,6 +17,45 @@ import {
 import { useLiveStats } from "@/hooks/useLiveStats";
 import { backendApi } from "@/core/backendApi";
 import { toast } from "sonner";
+
+type QualityCheckKey = "barcode" | "date" | "anomaly";
+type QualityChecks = Record<QualityCheckKey, boolean>;
+
+const QUALITY_MODE_OPTIONS = [
+  {
+    key: "barcode" as const,
+    label: "Code-barres",
+    desc: "Paquets sans code-barres comptés NOK",
+    Icon: ScanLine,
+    softBg: "#eff6ff",
+    iconBg: "#dbeafe",
+    text: "#0369a1",
+    border: "#7dd3fc",
+    shadow: "rgba(14,165,233,0.18)",
+  },
+  {
+    key: "date" as const,
+    label: "Date",
+    desc: "Paquets sans date lisible comptés NOK",
+    Icon: CalendarDays,
+    softBg: "#ecfdf5",
+    iconBg: "#d1fae5",
+    text: "#047857",
+    border: "#6ee7b7",
+    shadow: "rgba(16,185,129,0.18)",
+  },
+  {
+    key: "anomaly" as const,
+    label: "Anomalie",
+    desc: "Analyse visuelle des défauts de surface",
+    Icon: AlertCircle,
+    softBg: "#fff7ed",
+    iconBg: "#ffedd5",
+    text: "#c2410c",
+    border: "#fdba74",
+    shadow: "rgba(249,115,22,0.18)",
+  },
+] as const;
 
 const GMCBQualite = () => {
   const navigate = useNavigate();
@@ -47,7 +86,11 @@ const GMCBQualite = () => {
   const [schedulingSession, setSchedulingSession] = useState(false);
   const [streamRefreshToken, setStreamRefreshToken] = useState(0);
   const wasRunningRef = useRef(false);
-  const [qualiteChecks, setQualiteChecks] = useState({ barcode: true, date: true, anomaly: true });
+  const [qualiteChecks, setQualiteChecks] = useState<QualityChecks>({ barcode: true, date: true, anomaly: true });
+  const [liveChecksOverride, setLiveChecksOverride] = useState<QualityChecks | null>(null);
+  const [sessionChecksModalOpen, setSessionChecksModalOpen] = useState(false);
+  const [sessionChecksDraft, setSessionChecksDraft] = useState<QualityChecks>({ barcode: true, date: true, anomaly: true });
+  const [savingSessionChecks, setSavingSessionChecks] = useState(false);
 
   // Defect type → French label
   const defectLabel = (t: string) =>
@@ -75,6 +118,27 @@ const GMCBQualite = () => {
       setSessionStartTime(null);
     }
   }, [stats.isRunning]);
+
+  useEffect(() => {
+    if (!stats.isRunning) {
+      setLiveChecksOverride(null);
+      setSessionChecksModalOpen(false);
+      setSavingSessionChecks(false);
+      return;
+    }
+    if (
+      liveChecksOverride &&
+      QUALITY_MODE_OPTIONS.every(({ key }) => liveChecksOverride[key] === stats.activeChecks[key])
+    ) {
+      setLiveChecksOverride(null);
+    }
+  }, [
+    liveChecksOverride,
+    stats.activeChecks.anomaly,
+    stats.activeChecks.barcode,
+    stats.activeChecks.date,
+    stats.isRunning,
+  ]);
 
   // Fetch scheduled stop when session starts + keep in sync every 30s
   useEffect(() => {
@@ -168,6 +232,39 @@ const GMCBQualite = () => {
   const totalPages = Math.ceil(filtered.length / PER_PAGE);
   const pageAnom = filtered.slice(anomPage * PER_PAGE, (anomPage + 1) * PER_PAGE);
   const galleryItems = galleryExpanded ? filtered : filtered.slice(0, 8);
+  const hasSelectedQualityCheck = QUALITY_MODE_OPTIONS.some(({ key }) => qualiteChecks[key]);
+  const liveChecks = liveChecksOverride ?? stats.activeChecks;
+  const hasSelectedSessionChecks = QUALITY_MODE_OPTIONS.some(({ key }) => sessionChecksDraft[key]);
+  const visibleLiveModes = QUALITY_MODE_OPTIONS.filter(({ key }) => liveChecks[key]);
+
+  const openSessionChecksModal = () => {
+    setStopPickerOpen(false);
+    setSessionChecksDraft({ ...liveChecks });
+    setSessionChecksModalOpen(true);
+  };
+
+  const closeSessionChecksModal = () => {
+    if (savingSessionChecks) return;
+    setSessionChecksModalOpen(false);
+  };
+
+  const applySessionChecks = async () => {
+    if (!hasSelectedSessionChecks) {
+      toast.error("Au moins un contrôle doit rester actif.");
+      return;
+    }
+    setSavingSessionChecks(true);
+    try {
+      await backendApi.updateSessionChecks(sessionChecksDraft);
+      setLiveChecksOverride({ ...sessionChecksDraft });
+      setSessionChecksModalOpen(false);
+      toast.success("Modes actifs mis à jour.");
+    } catch {
+      toast.error("Impossible de modifier les modes actifs.");
+    } finally {
+      setSavingSessionChecks(false);
+    }
+  };
 
   // MJPEG stream: use ref so we can kill the connection on unmount / page switch
   const mjpegRef = useRef<HTMLImageElement | null>(null);
@@ -252,14 +349,20 @@ const GMCBQualite = () => {
                 <div style={{ padding: "20px 28px 28px", display: "flex", flexDirection: "column", gap: 10 }}>
                   <button
                     disabled={startingSession}
-                    onClick={() => setStartMode("direct")}
+                    onClick={() => {
+                      setQualiteChecks({ barcode: true, date: true, anomaly: stats.p1?.camera_available !== false });
+                      setStartMode("direct");
+                    }}
                     style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 20px", borderRadius: 12, border: "none", background: "linear-gradient(135deg,#0ea5e9,#0d9488)", color: "#fff", fontSize: 15, fontWeight: 700, cursor: "pointer" }}
                   >
                     <PlayCircle size={18} /> Démarrer une session
                   </button>
                   <button
                     disabled={startingSession || schedulingSession}
-                    onClick={() => setStartMode("scheduled")}
+                    onClick={() => {
+                      setQualiteChecks({ barcode: true, date: true, anomaly: stats.p1?.camera_available !== false });
+                      setStartMode("scheduled");
+                    }}
                     style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "13px 20px", borderRadius: 12, border: "none", background: "#b45309", color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer" }}
                   >
                     <Clock size={16} /> Démarrer et planifier la fin
@@ -287,7 +390,61 @@ const GMCBQualite = () => {
             )}
 
             {/* ── Step 2: configure checks (+ stop time) then confirm ── */}
-            {startMode !== null && (
+            {startMode === "direct" && (
+              <>
+                <div style={{ padding: 28, maxWidth: 420, width: "100%", margin: "0 auto" }}>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Démarrer une session</div>
+                  <div style={{ fontSize: 13, color: "#64748b", marginBottom: 20 }}>Choisissez les contrôles actifs pour cette session :</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
+                    {([
+                      { key: "barcode" as const, label: "Contrôle code-barres", desc: "Les paquets sans code-barres sont comptés NOK", camOk: stats.p0?.camera_available !== false },
+                      { key: "date" as const, label: "Contrôle date", desc: "Les paquets sans date lisible sont comptés NOK", camOk: stats.p0?.camera_available !== false },
+                      { key: "anomaly" as const, label: "Détection anomalie", desc: stats.p1?.camera_available === false ? "Caméra non détectée — mode indisponible" : "Analyse visuelle des défauts de surface", camOk: stats.p1?.camera_available !== false },
+                    ]).map(({ key, label, desc, camOk }) => {
+                      const active = qualiteChecks[key] && camOk;
+                      return (
+                        <label key={key} onClick={() => { if (camOk) setQualiteChecks((prev) => ({ ...prev, [key]: !prev[key] })); }} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "10px 14px", borderRadius: 10, border: `1px solid ${!camOk ? "#fecaca" : active ? "#99f6e4" : "#e2e8f0"}`, background: !camOk ? "#fef2f2" : active ? "#f0fdf9" : "#f8fafc", cursor: camOk ? "pointer" : "not-allowed", transition: "all 0.15s", opacity: camOk ? 1 : 0.65 }}>
+                          <div style={{ marginTop: 2, width: 18, height: 18, borderRadius: 4, border: `2px solid ${!camOk ? "#fca5a5" : active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all 0.15s" }}>
+                            {active && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: !camOk ? "#dc2626" : active ? "#0f766e" : "#64748b" }}>{label}{!camOk && " — indisponible"}</div>
+                            <div style={{ fontSize: 12, color: !camOk ? "#f87171" : "#94a3b8", marginTop: 2 }}>{desc}</div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={() => setStartMode(null)} style={{ border: "1px solid #d0d5dd", borderRadius: 10, padding: "9px 16px", background: "#fff", color: "#475467", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                      Annuler
+                    </button>
+                    <button
+                      disabled={startingSession || !hasSelectedQualityCheck}
+                      onClick={async () => {
+                        setStartingSession(true);
+                        try {
+                          const ep: string[] = [];
+                          if (qualiteChecks.barcode || qualiteChecks.date) ep.push("pipeline_barcode_date");
+                          if (qualiteChecks.anomaly) ep.push("pipeline_anomaly");
+                          await backendApi.startAll(undefined, ep, qualiteChecks);
+                          await backendApi.toggleRecording();
+                          setStartMode(null);
+                        } catch {
+                          toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
+                        } finally {
+                          setStartingSession(false);
+                        }
+                      }}
+                      style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: startingSession ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (startingSession || !hasSelectedQualityCheck) ? 0.5 : 1 }}
+                    >
+                      {startingSession ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+            {startMode === "scheduled" && (
               <>
                 <div style={{ padding: "20px 28px 16px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "center", gap: 12 }}>
                   <button
@@ -326,23 +483,42 @@ const GMCBQualite = () => {
                   {/* Check toggles */}
                   <div>
                     <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 8 }}>Contrôles qualité actifs :</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {([
-                        { key: "barcode" as const, label: "Code-barres", desc: "Paquets sans code-barres comptés NOK" },
-                        { key: "date" as const, label: "Date", desc: "Paquets sans date lisible comptés NOK" },
-                        { key: "anomaly" as const, label: "Anomalie", desc: "Analyse visuelle des défauts de surface" },
-                      ]).map(({ key, label, desc }) => {
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+                      {QUALITY_MODE_OPTIONS.map(({ key, label, desc, Icon, softBg, iconBg, text, border, shadow }) => {
                         const active = qualiteChecks[key];
                         return (
-                          <label key={key} onClick={() => setQualiteChecks(prev => ({ ...prev, [key]: !prev[key] }))} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: 10, border: `1px solid ${active ? "#99f6e4" : "#e2e8f0"}`, background: active ? "#f0fdf9" : "#f8fafc", cursor: "pointer", transition: "all 0.15s" }}>
-                            <div style={{ width: 18, height: 18, borderRadius: 5, border: `2px solid ${active ? "#0f766e" : "#cbd5e1"}`, background: active ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                              {active && <svg width="10" height="8" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => setQualiteChecks((prev) => ({ ...prev, [key]: !prev[key] }))}
+                            aria-pressed={active}
+                            title={`${active ? "Désactiver" : "Activer"} ${label}`}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 12,
+                              padding: "12px 14px",
+                              minHeight: 72,
+                              borderRadius: 14,
+                              border: `1px solid ${active ? border : "#e2e8f0"}`,
+                              background: active ? softBg : "linear-gradient(180deg,#ffffff 0%,#f8fafc 100%)",
+                              boxShadow: active ? `0 12px 24px ${shadow}` : "0 8px 20px rgba(15,23,42,0.05)",
+                              cursor: "pointer",
+                              transition: "all 0.15s",
+                              textAlign: "left",
+                            }}
+                          >
+                            <div style={{ width: 38, height: 38, borderRadius: 12, background: active ? iconBg : "#f8fafc", color: active ? text : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: `1px solid ${active ? "rgba(255,255,255,0.65)" : "#e2e8f0"}` }}>
+                              <Icon size={18} />
                             </div>
-                            <div>
-                              <div style={{ fontSize: 13, fontWeight: 700, color: active ? "#0f766e" : "#64748b", lineHeight: 1.3 }}>{label}</div>
-                              <div style={{ fontSize: 11, color: "#94a3b8" }}>{desc}</div>
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ fontSize: 13, fontWeight: 800, color: active ? text : "#334155", lineHeight: 1.3 }}>{label}</div>
+                              <div style={{ fontSize: 11, color: active ? text : "#94a3b8", opacity: active ? 0.78 : 1, marginTop: 3 }}>{desc}</div>
                             </div>
-                          </label>
+                            <div style={{ alignSelf: "flex-start", padding: "4px 9px", borderRadius: 999, background: active ? "#ffffff" : "#f8fafc", border: `1px solid ${active ? border : "#e2e8f0"}`, color: active ? text : "#64748b", fontSize: 10, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                              {active ? "Actif" : "Inactif"}
+                            </div>
+                          </button>
                         );
                       })}
                     </div>
@@ -351,7 +527,7 @@ const GMCBQualite = () => {
                   <button
                     disabled={
                       startingSession || schedulingSession ||
-                      (!qualiteChecks.barcode && !qualiteChecks.date && !qualiteChecks.anomaly) ||
+                      !hasSelectedQualityCheck ||
                       (startMode === "scheduled" && !stopTimeForStart)
                     }
                     onClick={async () => {
@@ -383,7 +559,7 @@ const GMCBQualite = () => {
                       background: startMode === "scheduled" ? "#b45309" : "linear-gradient(135deg,#0ea5e9,#0d9488)",
                       color: "#fff", fontSize: 15, fontWeight: 700,
                       cursor: (startingSession || schedulingSession) ? "wait" : "pointer",
-                      opacity: (startingSession || schedulingSession || (!qualiteChecks.barcode && !qualiteChecks.date && !qualiteChecks.anomaly) || (startMode === "scheduled" && !stopTimeForStart)) ? 0.5 : 1,
+                      opacity: (startingSession || schedulingSession || !hasSelectedQualityCheck || (startMode === "scheduled" && !stopTimeForStart)) ? 0.5 : 1,
                       transition: "opacity 0.15s",
                     }}
                   >
@@ -395,6 +571,97 @@ const GMCBQualite = () => {
               </>
             )}
 
+          </div>
+        </div>
+      )}
+      {stats.isRunning && sessionChecksModalOpen && (
+        <div
+          onClick={(e) => { if (e.target === e.currentTarget) closeSessionChecksModal(); }}
+          style={{ position: "fixed", inset: 0, background: "rgba(2,6,23,0.9)", backdropFilter: "blur(16px) saturate(0.7)", WebkitBackdropFilter: "blur(16px) saturate(0.7)", zIndex: 210, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+        >
+          <div style={{ background: "#fff", borderRadius: 24, width: 440, maxWidth: "94vw", boxShadow: "0 36px 120px rgba(0,0,0,0.55)", border: "1px solid #e5e7eb", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <div style={{ padding: "20px 28px 16px", borderBottom: "1px solid #f1f5f9", display: "flex", alignItems: "center", gap: 12 }}>
+              <button
+                type="button"
+                onClick={closeSessionChecksModal}
+                disabled={savingSessionChecks}
+                style={{ width: 34, height: 34, borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", cursor: savingSessionChecks ? "wait" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", flexShrink: 0 }}
+              >
+                <ArrowLeft size={16} />
+              </button>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#0f172a" }}>Contrôles qualité</div>
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                  Choisissez les vérifications actives pour cette session.
+                </div>
+              </div>
+              <div style={{ marginLeft: "auto", display: "flex", gap: 5 }}>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#e2e8f0" }} />
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#0d9488" }} />
+              </div>
+            </div>
+            <div style={{ padding: "20px 28px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#475569", marginBottom: 8 }}>Contrôles qualité actifs :</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+                  {QUALITY_MODE_OPTIONS.map(({ key, label, desc, Icon, softBg, iconBg, text, border, shadow }) => {
+                    const active = sessionChecksDraft[key];
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setSessionChecksDraft((prev) => ({ ...prev, [key]: !prev[key] }))}
+                        aria-pressed={active}
+                        title={`${active ? "Désactiver" : "Activer"} ${label}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                          padding: "12px 14px",
+                          minHeight: 72,
+                          borderRadius: 14,
+                          border: `1px solid ${active ? border : "#e2e8f0"}`,
+                          background: active ? softBg : "linear-gradient(180deg,#ffffff 0%,#f8fafc 100%)",
+                          boxShadow: active ? `0 12px 24px ${shadow}` : "0 8px 20px rgba(15,23,42,0.05)",
+                          cursor: "pointer",
+                          transition: "all 0.15s",
+                          textAlign: "left",
+                        }}
+                      >
+                        <div style={{ width: 38, height: 38, borderRadius: 12, background: active ? iconBg : "#f8fafc", color: active ? text : "#94a3b8", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: `1px solid ${active ? "rgba(255,255,255,0.65)" : "#e2e8f0"}` }}>
+                          <Icon size={18} />
+                        </div>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 800, color: active ? text : "#334155", lineHeight: 1.3 }}>{label}</div>
+                          <div style={{ fontSize: 11, color: active ? text : "#94a3b8", opacity: active ? 0.78 : 1, marginTop: 3 }}>{desc}</div>
+                        </div>
+                        <div style={{ alignSelf: "flex-start", padding: "4px 9px", borderRadius: 999, background: active ? "#ffffff" : "#f8fafc", border: `1px solid ${active ? border : "#e2e8f0"}`, color: active ? text : "#64748b", fontSize: 10, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", whiteSpace: "nowrap" }}>
+                          {active ? "Actif" : "Inactif"}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={applySessionChecks}
+                disabled={savingSessionChecks || !hasSelectedSessionChecks}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+                  padding: "13px 20px", borderRadius: 12, border: "none",
+                  background: "linear-gradient(135deg,#0ea5e9,#0d9488)",
+                  color: "#fff", fontSize: 15, fontWeight: 700,
+                  cursor: savingSessionChecks ? "wait" : "pointer",
+                  opacity: (savingSessionChecks || !hasSelectedSessionChecks) ? 0.5 : 1,
+                  transition: "opacity 0.15s",
+                }}
+              >
+                {savingSessionChecks
+                  ? <><Loader2 size={17} style={{ animation: "spin 1s linear infinite" }} /> Enregistrement…</>
+                  : <><PlayCircle size={17} /> Confirmer</>}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -425,7 +692,7 @@ const GMCBQualite = () => {
       {/* Session controls row */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24, flexWrap: "wrap", gap: 12 }}>
         {/* Session badge + active modes */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flex: "1 1 720px" }}>
           <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: stats.isRunning ? "#f0fdf4" : "#f8fafc", border: `1px solid ${stats.isRunning ? "#bbf7d0" : "#e2e8f0"}`, borderRadius: 10, padding: "6px 14px", fontSize: 13 }}>
             <span style={{ width: 8, height: 8, borderRadius: "50%", background: stats.isRunning ? "#22c55e" : "#94a3b8", display: "inline-block", boxShadow: stats.isRunning ? "0 0 0 3px rgba(34,197,94,0.2)" : "none" }} />
             <span style={{ fontWeight: 600, color: stats.isRunning ? "#15803d" : "#475569" }}>{stats.isRunning ? "Session active" : "Aucune session active"}</span>
@@ -433,20 +700,26 @@ const GMCBQualite = () => {
             <span style={{ color: "#666" }}>{dateLabel}</span>
           </div>
           {stats.isRunning && (
-            <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-              {([
-                { key: "barcode" as const, label: "Code-barres" },
-                { key: "date"    as const, label: "Date" },
-                { key: "anomaly" as const, label: "Anomalie" },
-              ]).map(({ key, label }) => {
-                const on = stats.activeChecks[key];
-                return (
-                  <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: on ? "#f0fdf4" : "#f9fafb", border: `1px solid ${on ? "#86efac" : "#e2e8f0"}`, color: on ? "#15803d" : "#94a3b8", borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
-                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: on ? "#22c55e" : "#cbd5e1", display: "inline-block" }} />
-                    {on ? "✓ " : ""}{label}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                {visibleLiveModes.map(({ key, label, iconBg, text }) => (
+                  <span
+                    key={key}
+                    style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999, padding: "6px 11px", fontSize: 12, fontWeight: 700, background: iconBg, color: text, border: "1px solid rgba(148,163,184,0.18)" }}
+                  >
+                    <span style={{ width: 7, height: 7, borderRadius: "50%", background: text, display: "inline-block" }} />
+                    {label}
                   </span>
-                );
-              })}
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={openSessionChecksModal}
+                style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "10px 14px", borderRadius: 12, border: "1px solid #dbe3ec", background: "#fff", color: "#334155", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+              >
+                <Settings size={15} />
+                Gérer les modes
+              </button>
             </div>
           )}
         </div>

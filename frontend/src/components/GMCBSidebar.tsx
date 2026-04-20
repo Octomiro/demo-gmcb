@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   ScanSearch,
   History,
+  FileText,
   Settings,
   ShieldCheck,
   MessageSquare,
@@ -42,6 +43,7 @@ const octoNormItems = [
 
 const additionalItems = [
   { title: "Historique", url: "/clients/gmcb/historique", icon: History },
+  { title: "Rapports PDF", url: "/clients/gmcb/rapports", icon: FileText },
   { title: "Admin Dashboard", url: "/clients/gmcb/admin", icon: ShieldCheck },
   { title: "Paramètres", url: "/clients/gmcb/settings", icon: Settings },
 ];

@@ -13,6 +13,15 @@ function backendVariantToRuleVariant(v: BackendVariant): RuleVariant {
   } catch {
     weekdays = [];
   }
+  let enabledChecks: { barcode: boolean; date: boolean; anomaly: boolean } | undefined;
+  if (v.enabled_checks) {
+    try {
+      const ec = typeof v.enabled_checks === "string" ? JSON.parse(v.enabled_checks) : v.enabled_checks;
+      if (ec && typeof ec === "object") {
+        enabledChecks = { barcode: ec.barcode !== false, date: ec.date !== false, anomaly: ec.anomaly !== false };
+      }
+    } catch { /* ignore */ }
+  }
   return {
     id: v.id,
     kind: v.kind,
@@ -23,6 +32,7 @@ function backendVariantToRuleVariant(v: BackendVariant): RuleVariant {
     startDate: v.start_date,
     endDate: v.end_date,
     weekdays,
+    ...(enabledChecks !== undefined && { enabledChecks }),
   };
 }
 
@@ -97,6 +107,7 @@ export type VariantDraft = {
   startDate: string;
   endDate: string;
   weekdays: string[];
+  enabledChecks?: { barcode: boolean; date: boolean; anomaly: boolean };
 };
 
 export interface UseShiftsReturn {
@@ -243,6 +254,7 @@ export function useShifts(): UseShiftsReturn {
       ...(draft.startDate !== undefined && { start_date: draft.startDate }),
       ...(draft.endDate !== undefined && { end_date: draft.endDate }),
       ...(draft.weekdays !== undefined && { days_of_week: draft.weekdays }),
+      ...(draft.enabledChecks !== undefined && { enabled_checks: draft.enabledChecks }),
     };
   }
 

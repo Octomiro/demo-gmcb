@@ -24,6 +24,7 @@ export interface PipelineStats {
   };
   db_connected: boolean;
   enabled_checks: { barcode: boolean; date: boolean; anomaly: boolean };
+  camera_available?: boolean;
 }
 
 export interface ActiveChecks {
