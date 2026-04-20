@@ -8,7 +8,7 @@ import {
 import {
   FILTER_TABS, formatHistoryDate, getHistoryPeriodLabel, getSessionsForDate,
   formatTunisiaTime, parseBackendTimestamp, buildTunisiaDateRange, galleryCategoryFromDefectType, proofFallbackForDefectType,
-  formatAdminDate, type AnomalyItem,
+  formatAdminDate, getTunisiaIsoDateFromTimestamp, type AnomalyItem,
 } from "./gmcbData";
 import {
   StatCard, MiniStat, Metric, Pager, CalendarPickerModal,
@@ -502,9 +502,15 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
                   const pct = total > 0 ? +((s.ok_count / total) * 100).toFixed(2) : 0;
                   const startH = formatTunisiaTime(s.started_at);
                   const endH = formatTunisiaTime(s.ended_at);
+                  const _startD = parseBackendTimestamp(s.started_at);
+                  const _endD = parseBackendTimestamp(s.ended_at);
+                  const _isOvernight = Boolean(_startD && _endD && getTunisiaIsoDateFromTimestamp(s.started_at) !== getTunisiaIsoDateFromTimestamp(s.ended_at));
                   return (
                     <div key={i} style={{ display: "grid", gridTemplateColumns: "96px minmax(260px, 1fr) 70px 88px", alignItems: "center", columnGap: 14, rowGap: 4, marginBottom: 10, paddingBottom: 10, borderBottom: "1px solid #f1f5f9" }}>
-                      <div style={{ fontSize: 12, color: "#666", whiteSpace: "nowrap" }}>{startH}–{endH}</div>
+                      <div style={{ fontSize: 12, color: "#666", whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 4 }}>
+                        <span>{startH}–{endH}</span>
+                        {_isOvernight && <span style={{ padding: "1px 5px", borderRadius: 4, background: "#eff6ff", color: "#2563eb", fontSize: 10, fontWeight: 700, border: "1px solid #bfdbfe", whiteSpace: "nowrap" }}>+1J</span>}
+                      </div>
                       <div style={{ flex: 1, background: "#f0fdf4", borderRadius: 4, height: 8, overflow: "hidden" }}>
                         <div style={{ width: pct + "%", background: "#22c55e", height: "100%", borderRadius: 4 }} />
                       </div>
@@ -654,6 +660,7 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
                         </div>
                         <div style={{ fontSize: 12, color: "#888", marginTop: 2, display: "flex", alignItems: "center", flexWrap: "wrap", gap: 4 }}>
                           <span>{startH} – {endH}</span>
+                          {(() => { const _sd = getTunisiaIsoDateFromTimestamp(s.started_at); const _ed = getTunisiaIsoDateFromTimestamp(s.ended_at); return (_sd && _ed && _sd !== _ed) ? <span style={{ padding: "1px 6px", borderRadius: 5, background: "#eff6ff", color: "#2563eb", fontSize: 10, fontWeight: 700, border: "1px solid #bfdbfe" }}>+1J</span> : null; })()}
                           {(() => {
                             const ec = s.enabled_checks ?? {
                               barcode: (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("barcode")),
@@ -994,9 +1001,11 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
 }) {
   const [crossings, setCrossings] = useState<any[]>([]);
   const [crossLoading, setCrossLoading] = useState(true);
+  const [checkChanges, setCheckChanges] = useState<any[]>([]);
   const [anomPage, setAnomalPage] = useState(0);
   const [activeFilter, setActiveFilter] = useState("Tous");
   const [galleryExpanded, setGalleryExpanded] = useState(false);
+  const [showHistoModal, setShowHistoModal] = useState(false);
   const PER_PAGE = 8;
 
   const total = session.total ?? 0;
@@ -1011,6 +1020,14 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
     backendApi.getCrossings(session.id, 5000).then((r: any) => {
       if (!cancelled) setCrossings(r?.crossings ?? []);
     }).catch(() => {}).finally(() => { if (!cancelled) setCrossLoading(false); });
+    return () => { cancelled = true; };
+  }, [session.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    backendApi.getCheckChanges(session.id).then((r: any) => {
+      if (!cancelled) setCheckChanges(r?.changes ?? []);
+    }).catch(() => {});
     return () => { cancelled = true; };
   }, [session.id]);
 
@@ -1092,6 +1109,127 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
         <StatCard icon={<Timer size={24} color="#9333ea" />} iconBg="#f3e8ff" value="75/min" label="Cadence analyse" />
       </div>
 
+      {/* Duration & Mode Stats — moved to bottom, see below */}
+      {null && (() => {
+        const startMs = session.started_at ? new Date(session.started_at).getTime() : null;
+        const endMs   = session.ended_at   ? new Date(session.ended_at).getTime()   : null;
+        if (!startMs || !endMs) return null;
+        const totalMs = endMs - startMs;
+        const totalMin = totalMs / 60000;
+
+        const fmtDuration = (ms: number) => {
+          const totalSec = Math.round(ms / 1000);
+          const h = Math.floor(totalSec / 3600);
+          const m = Math.floor((totalSec % 3600) / 60);
+          const s = totalSec % 60;
+          if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}min`;
+          if (m > 0) return `${m}min ${s.toString().padStart(2, "0")}s`;
+          return `${s}s`;
+        };
+
+        // Build per-mode active-time using check-change events
+        type CheckKey = "barcode" | "date" | "anomaly";
+        const MODES: { key: CheckKey; label: string; color: string; bg: string; border: string }[] = [
+          { key: "barcode", label: "Code à barre", color: "#0369a1", bg: "#eff6ff", border: "#bfdbfe" },
+          { key: "date",    label: "Date",          color: "#047857", bg: "#ecfdf5", border: "#a7f3d0" },
+          { key: "anomaly", label: "Anomalie",      color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+        ];
+
+        const initialChecks: Record<CheckKey, boolean> = {
+          barcode: session.enabled_checks?.barcode ?? true,
+          date:    session.enabled_checks?.date    ?? true,
+          anomaly: session.enabled_checks?.anomaly ?? true,
+        };
+
+        // Build timeline: [{ts, checks}] sorted by time
+        type Snap = { ts: number; checks: Record<CheckKey, boolean> };
+        const snapshots: Snap[] = [{ ts: startMs, checks: { ...initialChecks } }];
+        for (const c of checkChanges) {
+          let nc: Record<CheckKey, boolean> = { barcode: true, date: true, anomaly: true };
+          try { nc = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+          snapshots.push({ ts: new Date(c.changed_at).getTime(), checks: { ...nc } });
+        }
+        snapshots.sort((a, b) => a.ts - b.ts);
+        snapshots.push({ ts: endMs, checks: snapshots[snapshots.length - 1].checks });
+
+        const activeMsPerMode: Record<CheckKey, number> = { barcode: 0, date: 0, anomaly: 0 };
+        for (let i = 0; i < snapshots.length - 1; i++) {
+          const seg = snapshots[i + 1].ts - snapshots[i].ts;
+          for (const key of ["barcode", "date", "anomaly"] as CheckKey[]) {
+            if (snapshots[i].checks[key]) activeMsPerMode[key] += seg;
+          }
+        }
+
+        const durationLabel = fmtDuration(totalMs);
+        const hStart = formatTunisiaTime(session.started_at, true);
+        const hEnd   = formatTunisiaTime(session.ended_at,   true);
+
+        return (
+          <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8eaed", padding: 20, marginBottom: 24 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+              <Timer size={17} color="#6366f1" />
+              <span style={{ fontWeight: 700, fontSize: 15 }}>Durée &amp; Modes</span>
+            </div>
+
+            {/* Duration bar */}
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20, padding: "12px 16px", borderRadius: 10, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: "#ede9fe", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Timer size={20} color="#7c3aed" />
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#111", lineHeight: 1 }}>{durationLabel}</div>
+                <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>{hStart} → {hEnd}</div>
+              </div>
+              <div style={{ marginLeft: "auto", fontSize: 12, color: "#64748b", textAlign: "right" }}>
+                <div style={{ fontWeight: 600 }}>{Math.round(totalMin)} minutes</div>
+                <div>{session.total ?? 0} paquets analysés</div>
+              </div>
+            </div>
+
+            {/* Per-mode bars */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {MODES.map(({ key, label, color, bg, border }) => {
+                const activeMs  = activeMsPerMode[key];
+                const inactiveMs = totalMs - activeMs;
+                const activePct  = totalMs > 0 ? Math.round((activeMs / totalMs) * 100) : 0;
+                const inactivePct = 100 - activePct;
+                const activeLabel = fmtDuration(activeMs);
+                const inactiveLabel = inactiveMs > 0 ? fmtDuration(inactiveMs) : null;
+                return (
+                  <div key={key}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ padding: "2px 10px", borderRadius: 999, background: bg, color, border: `1px solid ${border}`, fontSize: 12, fontWeight: 700 }}>{label}</span>
+                        {inactiveMs > 0 && (
+                          <span style={{ fontSize: 11, color: "#888" }}>désactivé {fmtDuration(inactiveMs)}</span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color }}>
+                        {activeLabel} <span style={{ fontWeight: 400, color: "#999" }}>({activePct}%)</span>
+                      </div>
+                    </div>
+                    <div style={{ height: 8, borderRadius: 99, background: "#f1f5f9", overflow: "hidden" }}>
+                      <div style={{ display: "flex", height: "100%" }}>
+                        {activePct > 0 && (
+                          <div style={{ width: `${activePct}%`, background: color, borderRadius: inactivePct > 0 ? "99px 0 0 99px" : 99, transition: "width .4s" }} />
+                        )}
+                        {inactivePct > 0 && (
+                          <div style={{ width: `${inactivePct}%`, background: "#fecaca", borderRadius: activePct > 0 ? "0 99px 99px 0" : 99 }} />
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, fontSize: 10, color: "#aaa" }}>
+                      <span style={{ color }}>Actif {activePct}%</span>
+                      {inactivePct > 0 && <span style={{ color: "#ef4444" }}>Inactif {inactivePct}%</span>}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Anomalies */}
       <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8eaed", padding: 20, marginBottom: 24 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
@@ -1142,6 +1280,198 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
           </div>
         </div>
       </div>
+
+      {/* Duration & Modes + History Modal — right before gallery */}
+      {(() => {
+        const startMs = session.started_at ? new Date(session.started_at).getTime() : null;
+        const endMs   = session.ended_at   ? new Date(session.ended_at).getTime()   : null;
+        if (!startMs || !endMs) return null;
+        const totalMs = endMs - startMs;
+        const totalMin = totalMs / 60000;
+
+        const fmtDur = (ms: number) => {
+          const s = Math.round(ms / 1000);
+          const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+          if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}min`;
+          if (m > 0) return `${m}min ${sec.toString().padStart(2, "0")}s`;
+          return `${sec}s`;
+        };
+
+        type CheckKey = "barcode" | "date" | "anomaly";
+        const MODES: { key: CheckKey; label: string; color: string; bg: string; border: string }[] = [
+          { key: "barcode", label: "Code à barre", color: "#0369a1", bg: "#eff6ff", border: "#bfdbfe" },
+          { key: "date",    label: "Date",          color: "#047857", bg: "#ecfdf5", border: "#a7f3d0" },
+          { key: "anomaly", label: "Anomalie",      color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
+        ];
+        const initialChecks: Record<CheckKey, boolean> = {
+          barcode: session.enabled_checks?.barcode ?? true,
+          date:    session.enabled_checks?.date    ?? true,
+          anomaly: session.enabled_checks?.anomaly ?? true,
+        };
+        type Snap = { ts: number; checks: Record<CheckKey, boolean> };
+        const snapshots: Snap[] = [{ ts: startMs, checks: { ...initialChecks } }];
+        for (const c of checkChanges) {
+          let nc: Record<CheckKey, boolean> = { barcode: true, date: true, anomaly: true };
+          try { nc = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+          snapshots.push({ ts: new Date(c.changed_at).getTime(), checks: { ...nc } });
+        }
+        snapshots.sort((a, b) => a.ts - b.ts);
+        snapshots.push({ ts: endMs, checks: snapshots[snapshots.length - 1].checks });
+        const activeMsPerMode: Record<CheckKey, number> = { barcode: 0, date: 0, anomaly: 0 };
+        for (let i = 0; i < snapshots.length - 1; i++) {
+          const seg = snapshots[i + 1].ts - snapshots[i].ts;
+          for (const key of ["barcode", "date", "anomaly"] as CheckKey[]) {
+            if (snapshots[i].checks[key]) activeMsPerMode[key] += seg;
+          }
+        }
+
+        // For the modal timeline
+        const MODE_INFO = [
+          { key: "barcode" as CheckKey, label: "Code à barre", color: "#15803d", offColor: "#dc2626" },
+          { key: "date"    as CheckKey, label: "Date",          color: "#0369a1", offColor: "#dc2626" },
+          { key: "anomaly" as CheckKey, label: "Anomalie",      color: "#7c3aed", offColor: "#dc2626" },
+        ];
+        type CheckState = { barcode: boolean; date: boolean; anomaly: boolean };
+        type Period = { from: string; to: string | null };
+        const offPeriods: Record<string, Period[]> = { barcode: [], date: [], anomaly: [] };
+        const events = [
+          { ts: session.started_at, checks: initialChecks as CheckState },
+          ...checkChanges.map((c: any) => {
+            let parsed: CheckState = { barcode: true, date: true, anomaly: true };
+            try { parsed = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+            return { ts: c.changed_at, checks: parsed };
+          }),
+        ];
+        for (const mode of MODE_INFO) {
+          let offStart: string | null = null;
+          for (const ev of events) {
+            if (!ev.checks[mode.key] && offStart === null) offStart = ev.ts;
+            else if (ev.checks[mode.key] && offStart !== null) { offPeriods[mode.key].push({ from: offStart, to: ev.ts }); offStart = null; }
+          }
+          if (offStart !== null) offPeriods[mode.key].push({ from: offStart, to: session.ended_at });
+        }
+
+        const timelineEntries = [
+          { ts: session.started_at, label: "Démarrage session", icon: "▶", color: "#15803d", bg: "#dcfce7", border: "#bbf7d0",
+            sub: MODE_INFO.filter(m => initialChecks[m.key]).map(m => m.label).join(", ") || "aucun mode" },
+          ...checkChanges.map((c: any) => {
+            let oldC: CheckState = { barcode: true, date: true, anomaly: true };
+            let newC: CheckState = { barcode: true, date: true, anomaly: true };
+            try { oldC = typeof c.old_checks === "string" ? JSON.parse(c.old_checks) : c.old_checks; } catch { /**/ }
+            try { newC = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+            const changes: string[] = [];
+            for (const m of MODE_INFO) { if (oldC[m.key] !== newC[m.key]) changes.push(`${m.label} ${newC[m.key] ? "activé" : "désactivé"}`); }
+            const isOff = changes.some(ch => ch.includes("désactivé"));
+            return { ts: c.changed_at, label: changes.join(", ") || "Modification", icon: isOff ? "⏸" : "▶", color: isOff ? "#dc2626" : "#15803d", bg: isOff ? "#fee2e2" : "#dcfce7", border: isOff ? "#fecaca" : "#bbf7d0", sub: undefined as string | undefined };
+          }),
+          ...(session.ended_at ? [{ ts: session.ended_at, label: "Fin de session", icon: "■", color: "#6366f1", bg: "#eff6ff", border: "#c7d2fe", sub: undefined as string | undefined }] : []),
+        ];
+
+        return (
+          <>
+            {/* Summary card */}
+            <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8eaed", padding: 20, marginBottom: 24 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Timer size={17} color="#6366f1" />
+                  <span style={{ fontWeight: 700, fontSize: 15 }}>Durée &amp; Modes</span>
+                </div>
+                {checkChanges.length > 0 && (
+                  <button onClick={() => setShowHistoModal(true)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", borderRadius: 8, border: "1px solid #c7d2fe", background: "#eff6ff", fontSize: 13, cursor: "pointer", fontWeight: 500, color: "#2563eb" }}>
+                    Voir les détails
+                    <span style={{ background: "#2563eb", color: "#fff", borderRadius: 20, padding: "1px 8px", fontSize: 11, fontWeight: 700, marginLeft: 2 }}>{checkChanges.length}</span>
+                  </button>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20, padding: "12px 16px", borderRadius: 10, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: "#ede9fe", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Timer size={20} color="#7c3aed" />
+                </div>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: "#111", lineHeight: 1 }}>{fmtDur(totalMs)}</div>
+                  <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>{formatTunisiaTime(session.started_at, true)} → {formatTunisiaTime(session.ended_at, true)}</div>
+                </div>
+                <div style={{ marginLeft: "auto", fontSize: 12, color: "#64748b", textAlign: "right" }}>
+                  <div style={{ fontWeight: 600 }}>{Math.round(totalMin)} minutes</div>
+                  <div>{session.total ?? 0} paquets analysés</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {MODES.map(({ key, label, color, bg, border }) => {
+                  const activeMs = activeMsPerMode[key];
+                  const inactiveMs = totalMs - activeMs;
+                  const activePct = totalMs > 0 ? Math.round((activeMs / totalMs) * 100) : 0;
+                  const inactivePct = 100 - activePct;
+                  return (
+                    <div key={key}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ padding: "2px 10px", borderRadius: 999, background: bg, color, border: `1px solid ${border}`, fontSize: 12, fontWeight: 700 }}>{label}</span>
+                          {inactiveMs > 0 && <span style={{ fontSize: 11, color: "#888" }}>désactivé {fmtDur(inactiveMs)}</span>}
+                        </div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color }}>
+                          {fmtDur(activeMs)} <span style={{ fontWeight: 400, color: "#999" }}>({activePct}%)</span>
+                        </div>
+                      </div>
+                      <div style={{ height: 8, borderRadius: 99, background: "#f1f5f9", overflow: "hidden" }}>
+                        <div style={{ display: "flex", height: "100%" }}>
+                          {activePct > 0 && <div style={{ width: `${activePct}%`, background: color, borderRadius: inactivePct > 0 ? "99px 0 0 99px" : 99, transition: "width .4s" }} />}
+                          {inactivePct > 0 && <div style={{ width: `${inactivePct}%`, background: "#fecaca", borderRadius: activePct > 0 ? "0 99px 99px 0" : 99 }} />}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, fontSize: 10, color: "#aaa" }}>
+                        <span style={{ color }}>Actif {activePct}%</span>
+                        {inactivePct > 0 && <span style={{ color: "#ef4444" }}>Inactif {inactivePct}%</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Historique des modes modal */}
+            {showHistoModal && (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={() => setShowHistoModal(false)}>
+                <div style={{ background: "#fff", borderRadius: 14, padding: 28, maxWidth: 520, width: "100%", maxHeight: "80vh", overflowY: "auto", boxShadow: "0 8px 40px rgba(0,0,0,0.18)" }} onClick={e => e.stopPropagation()}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#6366f1" }} />
+                      <span style={{ fontWeight: 700, fontSize: 16 }}>Historique des modes</span>
+                      <span style={{ background: "#eff6ff", color: "#2563eb", borderRadius: 20, padding: "2px 10px", fontSize: 12, fontWeight: 600 }}>{checkChanges.length} changement{checkChanges.length > 1 ? "s" : ""}</span>
+                    </div>
+                    <button onClick={() => setShowHistoModal(false)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#888", lineHeight: 1 }}>✕</button>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {timelineEntries.map((ev, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", minWidth: 16 }}>
+                          <div style={{ width: 28, height: 28, borderRadius: "50%", background: ev.bg, border: `1.5px solid ${ev.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: ev.color, flexShrink: 0 }}>{ev.icon}</div>
+                          {i < timelineEntries.length - 1 && <div style={{ width: 2, height: 20, background: "#e5e7eb", marginTop: 2 }} />}
+                        </div>
+                        <div style={{ paddingTop: 4 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "#111" }}>
+                            {ev.label}
+                            {ev.sub !== undefined && <span style={{ fontWeight: 400, color: "#555", marginLeft: 6 }}>({ev.sub})</span>}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#888", marginTop: 1 }}>{formatTunisiaTime(ev.ts, true)}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {MODE_INFO.filter(m => offPeriods[m.key].length > 0).map(m => (
+                    <div key={m.key} style={{ marginTop: 16, padding: "12px 14px", borderRadius: 8, background: "#fef2f2", border: "1px solid #fecaca" }}>
+                      <div style={{ fontWeight: 700, fontSize: 12, color: "#dc2626", marginBottom: 6 }}>{m.label} — périodes désactivées</div>
+                      {offPeriods[m.key].map((p, pi) => (
+                        <div key={pi} style={{ fontSize: 12, color: "#7f1d1d", marginBottom: 2 }}>⏱ {formatTunisiaTime(p.from, true)} → {p.to ? formatTunisiaTime(p.to, true) : "fin de session"}</div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        );
+      })()}
 
       {/* Gallery Anomalies */}
       {crossings.length > 0 && (() => {

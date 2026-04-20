@@ -200,6 +200,28 @@ class DBWriter:
             finally:
                 self._release_pg_conn(conn)
 
+    def get_check_changes_for_group(self, group_id):
+        """Return all check-change events for the given session group, ordered by time."""
+        if not self._available or not group_id:
+            return []
+        conn = self._get_pg_conn()
+        if not conn:
+            return []
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, group_id, changed_at, old_checks, new_checks "
+                    "FROM session_check_changes WHERE group_id = %s ORDER BY changed_at ASC",
+                    (group_id,),
+                )
+                rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"[DBWriter] get_check_changes_for_group error: {e}")
+            return []
+        finally:
+            self._release_pg_conn(conn)
+
     def update_session_checks(self, group_id, new_checks):
         """Update enabled_checks on all session rows sharing a group_id."""
         if not self._available or not group_id:
@@ -884,6 +906,7 @@ class DBWriter:
             "[]",
             session.get("camera_source", "0"),
             session.get("checkpoint_id", "tracking"),
+            session.get("enabled_pipelines", '["pipeline_barcode_date","pipeline_anomaly"]'),
             session.get("enabled_checks", '{"barcode":true,"date":true,"anomaly":true}'),
             1,
             session["created_at"],
@@ -896,8 +919,8 @@ class DBWriter:
                 cur.execute(
                     "INSERT INTO shifts "
                     "(id, label, type, start_time, end_time, session_date, days_of_week, "
-                    "camera_source, checkpoint_id, enabled_checks, active, created_at) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    "camera_source, checkpoint_id, enabled_pipelines, enabled_checks, active, created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                     params,
                 )
             conn.commit()

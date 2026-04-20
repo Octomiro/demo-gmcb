@@ -424,7 +424,7 @@ const GMCBAdmin = () => {
 
   async function addSingleSession() {
     if (selectedDateIsPast || !singleDraft.date || !singleDraft.start || !singleDraft.end) return;
-    if (singleDraft.start >= singleDraft.end) {
+    if (!singleDraft.endNextDay && singleDraft.start >= singleDraft.end) {
       toast.error("L'heure de début doit être avant l'heure de fin");
       return;
     }
@@ -451,7 +451,7 @@ const GMCBAdmin = () => {
     }
     const name = getNextShiftNameForDate(singleDraft.date, recurringRules, oneOffSessions);
     try {
-      await addOneOff({ label: name, date: singleDraft.date, start_time: singleDraft.start, end_time: singleDraft.end, enabled_checks: singleDraft.enabledChecks });
+      await addOneOff({ label: name, date: singleDraft.date, start_time: singleDraft.start, end_time: singleDraft.end, end_next_day: singleDraft.endNextDay, enabled_checks: singleDraft.enabledChecks });
       toast.success(`${name} créé avec succès (${singleDraft.start}–${singleDraft.end})`);
       setSingleDraft(getDefaultSingleDraft(selectedDate));
       setSingleModalOpen(false);
@@ -1130,8 +1130,11 @@ const GMCBAdmin = () => {
               (hs) => hs.shift_id === session.id || hs.shift_id === session.sourceId
             );
             const hasActuallyEnded = Boolean(matchingHistorySession?.ended_at);
-            const sessionEnded = hasActuallyEnded || selectedDate < today || (selectedDate === today && timeToMinutes(session.end) <= currentMinutes);
-            const sessionInProgress = !hasActuallyEnded && selectedDate === today && timeToMinutes(session.start) <= currentMinutes && !sessionEnded;
+            const _endMin = timeToMinutes(session.end);
+            const _startMin = timeToMinutes(session.start);
+            const _effectiveEnd = _endMin < _startMin ? _endMin + 1440 : _endMin;
+            const sessionEnded = hasActuallyEnded || selectedDate < today || (selectedDate === today && _effectiveEnd <= currentMinutes);
+            const sessionInProgress = !hasActuallyEnded && selectedDate === today && _startMin <= currentMinutes && !sessionEnded;
             const sessionReadOnly = selectedDateIsPast || sessionEnded;
             return (
               <div key={session.id} style={{ border: `1px solid ${sessionReadOnly ? "#bbf7d0" : sessionInProgress ? "#99f6e4" : session.disabled ? "#fecaca" : "#e5e7eb"}`, background: sessionReadOnly ? "#f0fdf4" : sessionInProgress ? "#f0fdfa" : session.disabled ? "#fff7f7" : "#fff", borderRadius: 14, padding: 14 }}>
@@ -1368,6 +1371,12 @@ const GMCBAdmin = () => {
           <div>
             <div style={{ fontSize: 12, color: "#64748b", marginBottom: 5 }}>Fin (arrêt)</div>
             <input type="time" value={singleDraft.end} onChange={(e) => setSingleDraft({ ...singleDraft, end: e.target.value })} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #d0d5dd", fontSize: 13, boxSizing: "border-box" }} />
+            <label onClick={() => setSingleDraft((c) => ({ ...c, endNextDay: !c.endNextDay }))} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 6, cursor: "pointer", userSelect: "none" }}>
+              <div style={{ width: 16, height: 16, borderRadius: 4, border: `2px solid ${singleDraft.endNextDay ? "#0f766e" : "#cbd5e1"}`, background: singleDraft.endNextDay ? "#0f766e" : "#fff", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                {singleDraft.endNextDay && <svg width="9" height="7" viewBox="0 0 10 8"><path d="M1 4l3 3 5-6" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+              </div>
+              <span style={{ fontSize: 11, color: singleDraft.endNextDay ? "#0f766e" : "#94a3b8", fontWeight: singleDraft.endNextDay ? 700 : 400 }}>Fin le lendemain (+1 j)</span>
+            </label>
           </div>
         </div>
         {/* Checks */}

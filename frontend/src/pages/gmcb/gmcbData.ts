@@ -536,6 +536,7 @@ export function getDefaultSingleDraft(dateIso: string) {
     start: "09:00",
     end: "10:30",
     autoStart: true,
+    endNextDay: false,
     enabledChecks: { barcode: true, date: true, anomaly: true } as { barcode: boolean; date: boolean; anomaly: boolean },
   };
 }

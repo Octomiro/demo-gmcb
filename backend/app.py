@@ -44,7 +44,10 @@ from scheduler import (
     cleanup_old_proof_images,
 )
 from apscheduler.triggers.cron import CronTrigger
+from concurrent.futures import ProcessPoolExecutor
 from reporting import build_report_summary, generate_report_pdf
+
+_report_executor = ProcessPoolExecutor(max_workers=1)
 
 from auth import auth_bp
 from feedback import feedback_bp, run_screenshot_cleanup as _feedback_screenshot_cleanup
@@ -744,6 +747,14 @@ def api_stats_session(session_id):
     return jsonify(data)
 
 
+@app.route('/api/stats/session/<session_id>/check-changes')
+def api_stats_session_check_changes(session_id):
+    if db_writer is None:
+        return jsonify({"changes": []})
+    rows = db_writer.get_check_changes_for_group(session_id)
+    return jsonify({"changes": rows})
+
+
 @app.route('/api/stats/session/<session_id>/crossings')
 def api_stats_session_crossings(session_id):
     if db_writer is None:
@@ -817,7 +828,8 @@ def api_reports_pdf():
         return error_response
 
     try:
-        pdf_bytes = generate_report_pdf(summary)
+        future = _report_executor.submit(generate_report_pdf, summary)
+        pdf_bytes = future.result(timeout=120)
     except Exception as exc:
         print(f"[REPORT] pdf error: {exc}")
         return jsonify({"error": "pdf_generation_failed"}), 500
@@ -1791,9 +1803,10 @@ def api_one_off_create():
     date = (data.get("date") or "").strip()
     start_time = (data.get("start_time") or "").strip()
     end_time = (data.get("end_time") or "").strip()
+    end_next_day = bool(data.get("end_next_day", False))
     if not label or not date or not start_time or not end_time:
         return jsonify({"error": "label, date, start_time, end_time are required"}), 400
-    if not _time_order_ok(start_time, end_time):
+    if not end_next_day and not _time_order_ok(start_time, end_time):
         return jsonify({"error": "L'heure de début doit être avant l'heure de fin"}), 400
     if _one_off_start_already_passed(date, start_time):
         return jsonify({"error": "Impossible de créer un shift ponctuel si son heure de début est déjà passée"}), 400

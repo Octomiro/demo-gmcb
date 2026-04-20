@@ -200,7 +200,8 @@ def _shift_start(shift_id):
     _ep_raw = shift.get("enabled_pipelines")
     try:
         import json as _json
-        enabled_pids = set(_json.loads(_ep_raw)) if _ep_raw else {p["id"] for p in PIPELINES}
+        _parsed_pids = _json.loads(_ep_raw) if _ep_raw else []
+        enabled_pids = set(_parsed_pids) if _parsed_pids else {p["id"] for p in PIPELINES}
     except Exception:
         enabled_pids = {p["id"] for p in PIPELINES}
 
@@ -346,6 +347,9 @@ def _schedule_shift(shift):
         try:
             start_dt = _dt.strptime(f"{session_date} {shift['start_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
             end_dt = _dt.strptime(f"{session_date} {shift['end_time']}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+            # Overnight shift: end time is earlier than start time → ends the next day
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
         except ValueError as e:
             print(f"[SCHEDULER] One-off shift date parse error: {e}")
             return
