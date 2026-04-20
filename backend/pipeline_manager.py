@@ -6,6 +6,7 @@ from ultralytics import YOLO
 from tracking_config import (
     CONFIG, DEVICE, PIPELINES, DEFAULT_VIEW_PIPELINE,
     CHECKPOINTS, get_checkpoint,
+    CAMERA_WIDTH, CAMERA_HEIGHT, STREAM_WIDTH, STREAM_HEIGHT,
 )
 from detection import TrackingState
 from db_writer import DBWriter
@@ -51,8 +52,12 @@ def init_pipeline(pipe_cfg):
         raise ValueError(f"Unknown checkpoint id: {cp_id} for pipeline {pid}")
 
     state = TrackingState(pipeline_id=pid, db_writer=db_writer)
-
-    print(f"[{pid}] Loading model: {checkpoint['label']} ({checkpoint['path']})...")
+    # Per-pipeline capture resolution (overrides global CAMERA_WIDTH/HEIGHT)
+    state._capture_width  = pipe_cfg.get("camera_width",  CAMERA_WIDTH)
+    state._capture_height = pipe_cfg.get("camera_height", CAMERA_HEIGHT)
+    # Per-pipeline stream resolution (overrides global STREAM_WIDTH/HEIGHT)
+    state._stream_width   = pipe_cfg.get("stream_width",  STREAM_WIDTH)
+    state._stream_height  = pipe_cfg.get("stream_height", STREAM_HEIGHT)
     state.model = YOLO(checkpoint["path"])
     state.model.to(DEVICE)
     names = state.model.names

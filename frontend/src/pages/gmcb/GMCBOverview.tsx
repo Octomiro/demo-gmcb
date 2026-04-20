@@ -63,7 +63,10 @@ function getSessionKindLabel(session: PlannedSession): string {
 }
 
 function isInterruptedHistorySession(session: HistorySession): boolean {
-  return Boolean(session.ended_at?.startsWith("interrupted:"));
+  // New rows: check dedicated end_reason field
+  if (session.end_reason === "interrupted" || session.end_reason === "preempted") return true;
+  // Legacy rows: reason was embedded in ended_at string
+  return Boolean(session.ended_at?.startsWith("interrupted:") || session.ended_at?.startsWith("preempted:"));
 }
 
 function historySessionMatchesLiveSession(
@@ -157,7 +160,11 @@ const GMCBOverview: React.FC = () => {
       const interruptionPct = isInterrupted
         ? Math.round((interruptedMinutes / plannedDurationMinutes) * 100)
         : 0;
-      const interruptionCause = matchingHistory?.ended_at?.startsWith("interrupted:")
+      const interruptionCause = matchingHistory?.end_reason === "interrupted"
+        ? "arrêt système"
+        : matchingHistory?.end_reason === "preempted"
+        ? "shift automatique"
+        : matchingHistory?.ended_at?.startsWith("interrupted:") // backward compat for old rows
         ? "arrêt système"
         : "arrêt volontaire";
       const interruptionTooltip = isInterrupted

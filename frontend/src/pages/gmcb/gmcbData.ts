@@ -105,7 +105,10 @@ function getTunisiaParts(date: Date) {
 
 export function parseBackendTimestamp(raw?: string | null): Date | null {
   if (!raw) return null;
-  const normalized = raw.startsWith("interrupted:") ? raw.slice("interrupted:".length) : raw;
+  // Strip legacy prefixes written into ended_at before end_reason column existed
+  let normalized = raw;
+  if (normalized.startsWith("interrupted:")) normalized = normalized.slice("interrupted:".length);
+  else if (normalized.startsWith("preempted:")) normalized = normalized.slice("preempted:".length);
   const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/.test(normalized);
   // Backend stores local Tunisia time (UTC+1) without timezone suffix
   const parsed = new Date(hasTimezone ? normalized : `${normalized}+01:00`);

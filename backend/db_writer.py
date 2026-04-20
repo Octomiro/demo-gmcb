@@ -79,8 +79,8 @@ class DBWriter:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE sessions SET ended_at = %s WHERE ended_at IS NULL",
-                    ("interrupted:" + _ts(),),
+                    "UPDATE sessions SET ended_at = %s, end_reason = %s WHERE ended_at IS NULL",
+                    (_ts(), "interrupted"),
                 )
             conn.commit()
         except Exception as e:
@@ -152,9 +152,9 @@ class DBWriter:
             return
         totals = totals or {}
         ts = _ts()
-        ended_at = f"{end_reason}:{ts}" if end_reason else ts
         params = (
-            ended_at,
+            ts,
+            end_reason or None,
             totals.get("total", 0),
             totals.get("ok_count", 0),
             totals.get("nok_no_barcode", 0),
@@ -167,7 +167,7 @@ class DBWriter:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE sessions SET ended_at=%s, total=%s, ok_count=%s, "
+                        "UPDATE sessions SET ended_at=%s, end_reason=%s, total=%s, ok_count=%s, "
                         "nok_no_barcode=%s, nok_no_date=%s, nok_anomaly=%s WHERE id=%s",
                         params,
                     )
@@ -206,7 +206,7 @@ class DBWriter:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, group_id, shift_id, started_at, ended_at, checkpoint_id, camera_source, "
+                    "SELECT id, group_id, shift_id, started_at, ended_at, end_reason, checkpoint_id, camera_source, "
                     "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly, enabled_checks "
                     "FROM sessions ORDER BY started_at DESC LIMIT %s",
                     (limit,),
@@ -264,6 +264,7 @@ class DBWriter:
                     "shift_id": r.get("shift_id", ""),
                     "started_at": r["started_at"],
                     "ended_at": r.get("ended_at"),
+                    "end_reason": r.get("end_reason"),
                     "total": 0,
                     "ok_count": 0,
                     "nok_no_barcode": 0,
@@ -303,6 +304,12 @@ class DBWriter:
                 g["started_at"] = r["started_at"]
             if r.get("ended_at") and (not g["ended_at"] or r["ended_at"] > g["ended_at"]):
                 g["ended_at"] = r["ended_at"]
+                # Propagate the most severe end_reason (preempted > interrupted > normal)
+                _reason_priority = {"preempted": 2, "interrupted": 1}
+                new_p = _reason_priority.get(r.get("end_reason") or "", 0)
+                cur_p = _reason_priority.get(g.get("end_reason") or "", 0)
+                if new_p > cur_p:
+                    g["end_reason"] = r.get("end_reason")
         return list(groups.values())[:limit]
 
     def list_crossings_for_group(self, group_id, limit=5000):
