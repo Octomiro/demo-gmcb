@@ -473,3 +473,9 @@ This **already runs on GPU** (`DEVICE = cuda`). YOLO and EfficientAD inference a
 
 **if we restart the server the containers reopen but the ports could be distrubute differently so the camera/pipelines are inversed i made an interface in the dashbord called parameter where admins cna switch from there without touching the hardware but there is a system level config to avoid randomly allocating ports 
 
+**backend images are different cuda 13.1 for gmcb and 12.6 for 9anita what is the best way to pull the latest image once there (possibly limited internet) i copied the files on a usb flash drive 
+
+**final orchestration between the two pipelines (to communicate with plc team) 
+-independnat decisions each one have it's exit line when crossing it we send a request
+- a common field of vision we draw a line in there (date might not be detected at that stage yet)
+- pile logic as they will be in order for the 2 pipelines (packet 1 will appear on anomlie camera then the detection one we save them and do an AND)
