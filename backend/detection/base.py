@@ -375,11 +375,10 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         if queue_depth > 50:
             print(f"[PROOF] Queue full ({queue_depth}), dropping proof for packet #{pkt_num}")
             return
-        frame_copy = frame.copy()
         session_now = self._db_session_id
         _proof_executor.submit(
             self._save_proof_image,
-            pkt_num, defect_type, frame_copy, bbox, session_now,
+            pkt_num, defect_type, frame, bbox, session_now,
         )
 
     # ─────────────────────────────────────────
