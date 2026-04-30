@@ -197,7 +197,8 @@ class ReaderMixin:
                 _effective_skip = ANOMALY_FRAME_SKIP if self.mode == "anomaly" else DETECTOR_FRAME_SKIP
                 if self.frame_count % _effective_skip == 0:
                     with self._det_lock:
-                        self._det_frame = frame.copy()
+                        # Safe zero-copy handoff: detector treats frames as read-only.
+                        self._det_frame = frame
                         self._det_frame_idx = frame_idx
                     self._det_event.set()
 
@@ -260,7 +261,8 @@ class ReaderMixin:
                 _effective_skip = ANOMALY_FRAME_SKIP if self.mode == "anomaly" else DETECTOR_FRAME_SKIP
                 if self.frame_count % _effective_skip == 0:
                     with self._det_lock:
-                        self._det_frame = frame.copy()
+                        # Safe zero-copy handoff: detector treats frames as read-only.
+                        self._det_frame = frame
                         self._det_frame_idx = frame_idx
                     self._det_event.set()
 
@@ -337,7 +339,8 @@ class ReaderMixin:
                 _effective_skip = ANOMALY_FRAME_SKIP if self.mode == "anomaly" else DETECTOR_FRAME_SKIP
                 if self.frame_count % _effective_skip == 0:
                     with self._det_lock:
-                        self._det_frame = frame.copy()
+                        # Safe zero-copy handoff: detector treats frames as read-only.
+                        self._det_frame = frame
                         self._det_frame_idx = frame_idx
                     self._det_event.set()
 
