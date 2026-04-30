@@ -3,6 +3,7 @@ CHECKPOINTS = [
         "id":            "barcode_date",
         "label":         "Tracking Paquet+Barcode+Date",
         "path":          "yolo26m_BB_barcode_date.pt",
+        "task": "detect" # required for TensorRT
         "mode":          "tracking",
         "package_class": "package",
         "barcode_class": "barcode",
@@ -22,6 +23,7 @@ CHECKPOINTS = [
         "id":            "anomaly",
         "label":         "Segmentation + Anomaly Detection",
         "path":          "yolo26m_seg_farine_FV_v3.pt",
+        "task": "segment" # refers to YOLO segmentation part since task is required for TensorRT            
         "mode":          "anomaly",
         "package_class": "farine",
         "barcode_class": None,

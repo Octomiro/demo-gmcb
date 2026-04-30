@@ -58,7 +58,7 @@ def init_pipeline(pipe_cfg):
     # Per-pipeline stream resolution (overrides global STREAM_WIDTH/HEIGHT)
     state._stream_width   = pipe_cfg.get("stream_width",  STREAM_WIDTH)
     state._stream_height  = pipe_cfg.get("stream_height", STREAM_HEIGHT)
-    state.model = YOLO(checkpoint["path"])
+    state.model = YOLO(checkpoint["path"], task=checkpoint["task"])
     state.model.to(DEVICE)
     names = state.model.names
 
