@@ -1,12 +1,58 @@
 import os
+import platform
 import time
 
 import cv2
+import numpy as np
 
 from tracking_config import (
     CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT,
     DETECTOR_FRAME_SKIP, ANOMALY_FRAME_SKIP,
 )
+
+# ── TurboJPEG decode (same lib as compositor encode): SIMD JPEG → BGR ─────────
+try:
+    from turbojpeg import TJPF_BGR, TurboJPEG
+
+    _tj_reader = TurboJPEG()
+    _HAS_TURBOJPEG_DECODE = True
+except Exception:
+    _tj_reader = None
+    TJPF_BGR = None  # type: ignore[misc, assignment]
+    _HAS_TURBOJPEG_DECODE = False
+
+
+def _mjpeg_grab_decode(cap: cv2.VideoCapture):
+    """grab + retrieve when CAP_PROP_CONVERT_RGB=0: JPEG bytes → BGR.
+
+    Falls back to cv2.imdecode if TurboJPEG fails. Returns (ok, frame|None).
+    """
+    if not cap.grab():
+        return False, None
+    ret, buf = cap.retrieve()
+    if not ret or buf is None:
+        return False, None
+    # Driver already decoded to BGR
+    if buf.ndim == 3 and buf.shape[2] == 3 and buf.shape[0] > 1:
+        return True, buf
+    flat = np.ascontiguousarray(buf.reshape(-1))
+    raw = flat.tobytes()
+    if len(raw) < 4:
+        return False, None
+    if raw[0] != 0xFF or raw[1] != 0xD8:
+        return False, None
+    if _HAS_TURBOJPEG_DECODE and _tj_reader is not None and TJPF_BGR is not None:
+        try:
+            return True, _tj_reader.decode(raw, pixel_format=TJPF_BGR)
+        except Exception:
+            pass
+    try:
+        frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is not None:
+            return True, frame
+    except Exception:
+        pass
+    return False, None
 
 
 class ReaderMixin:
@@ -76,11 +122,31 @@ class ReaderMixin:
                 f"{'OK: camera using MJPEG (compressed)' if fourcc_str.strip() == 'MJPG' else 'WARNING: camera NOT using MJPG — high USB bandwidth!'}"
             )
 
+            # MJPEG on Linux V4L2: optional raw JPEG buffers + TurboJPEG SIMD decode
+            # (same PyTurboJPEG as compositor). Falls back to cap.read() per-frame if needed.
+            use_turbo_mjpeg = (
+                not _is_rtsp
+                and platform.system() != "Windows"
+                and fourcc_str.strip() == "MJPG"
+                and _HAS_TURBOJPEG_DECODE
+            )
+            if use_turbo_mjpeg:
+                cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+                print("[READER] MJPEG decode: TurboJPEG (V4L2 JPEG → BGR, SIMD)")
+            elif not _is_rtsp and platform.system() != "Windows" and fourcc_str.strip() == "MJPG":
+                print("[READER] MJPEG decode: OpenCV cap.read() (TurboJPEG import unavailable)")
+
             # Flush stale frames accumulated in the V4L2/driver buffer before
             # entering the main loop, so the stream starts from a fresh frame.
             self.cap = cap
-            for _ in range(4):
-                cap.grab()
+            if use_turbo_mjpeg:
+                for _ in range(4):
+                    ok, _ = _mjpeg_grab_decode(cap)
+                    if not ok:
+                        cap.read()
+            else:
+                for _ in range(4):
+                    cap.grab()
 
             with self._stats_lock:
                 self.stats["video_fps"] = round(fps, 1)
@@ -97,7 +163,14 @@ class ReaderMixin:
             _rfps_t0 = time.monotonic()
 
             while self.is_running:
-                ret, frame = cap.read()
+                if use_turbo_mjpeg:
+                    ret, frame = _mjpeg_grab_decode(cap)
+                    if not ret:
+                        cap.set(cv2.CAP_PROP_CONVERT_RGB, 1)
+                        ret, frame = cap.read()
+                        cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+                else:
+                    ret, frame = cap.read()
                 if not ret:
                     # USB detached or stream lost — attempt reconnect (USB only)
                     if _is_rtsp:
@@ -113,7 +186,6 @@ class ReaderMixin:
                     with self._stats_lock:
                         self.stats["camera_reconnecting"] = True
                     reconnected = False
-                    import platform
                     attempt = 0
                     # Fast reconnect: try every 0.3s for first 5 attempts (cable glitch recovery),
                     # then slow down to 1s. Minimises detection gap during USB extender drops.
@@ -135,9 +207,15 @@ class ReaderMixin:
                             new_cap.set(cv2.CAP_PROP_FPS, CAMERA_FPS)
                             new_cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
                             if new_cap.isOpened():
-                                # flush stale frames
-                                for _ in range(4):
-                                    new_cap.grab()
+                                if use_turbo_mjpeg:
+                                    new_cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+                                    for _ in range(4):
+                                        ok, _ = _mjpeg_grab_decode(new_cap)
+                                        if not ok:
+                                            new_cap.read()
+                                else:
+                                    for _ in range(4):
+                                        new_cap.grab()
                                 cap = new_cap
                                 self.cap = cap
                                 reconnected = True
@@ -296,10 +374,14 @@ class ReaderMixin:
             self.is_running = False
             return
 
-        raw_fps = cap.get(_cv2.CAP_PROP_FPS) or CAMERA_FPS
+        raw_fps = CAMERA_FPS # Emulate real camera FPS
         w = int(cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
         frame_interval = 1.0 / raw_fps
+        
+        # Simulate real camera properties if it's a video file
+        w = CAMERA_WIDTH
+        h = CAMERA_HEIGHT
 
         with self._stats_lock:
             self.stats["video_fps"] = round(raw_fps, 1)
@@ -322,6 +404,9 @@ class ReaderMixin:
 
                 self.frame_count += 1
                 frame_idx = self.frame_count
+
+                # Simulation: resize video frames to camera resolution
+                frame = cv2.resize(frame, (CAMERA_WIDTH, CAMERA_HEIGHT))
 
                 rot_steps = self._rotation_steps % 4
                 if rot_steps:
