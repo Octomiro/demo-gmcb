@@ -65,12 +65,12 @@ DEFAULT_CAMERA_ID = "cam0"
 # PIPELINES  (each pipeline = one camera + one checkpoint running in parallel)
 # ==========================
 PIPELINES = [
-    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": 0, "checkpoint_id": "barcode_date"},
+    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": "/app/videos/V1_comp.mp4", "checkpoint_id": "barcode_date"},
     # Anomaly camera uses lower capture resolution to reduce USB 2.0 bandwidth.
     # Both cameras share Bus 001 (480 Mbps). At 1920x1080 complex scenes push
     # MJPEG frames to 200-400KB each → bus congestion → FPS drops.
     # EfficientAD runs at 256px internally so 1280x720 capture loses nothing.
-    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": 2, "checkpoint_id": "anomaly",
+    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": "/app/videos/testAnomalie-Trim3.mp4", "checkpoint_id": "anomaly",
      "camera_width": 1280, "camera_height": 720},
 ]
 
