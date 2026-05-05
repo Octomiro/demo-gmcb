@@ -78,7 +78,7 @@ def init_pipeline(pipe_cfg):
     sec_cls = checkpoint.get("secondary_date_class")
     if sec_path and state.mode == "tracking":
         try:
-            state.secondary_model = YOLO(sec_path)
+            state.secondary_model = YOLO(sec_path, task="detect")
             state.secondary_model.to(DEVICE)
             sec_names = state.secondary_model.names
             state._secondary_date_id = next(

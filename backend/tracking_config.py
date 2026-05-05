@@ -2,7 +2,7 @@ CHECKPOINTS = [
     {
         "id":            "barcode_date",
         "label":         "Tracking Paquet+Barcode+Date",
-        "path":          "yolo26m_BB_barcode_date.pt",
+        "path":          "yolo26m_BB_barcode_date.engine",
         "task": "detect" # required for TensorRT
         "mode":          "tracking",
         "package_class": "package",
@@ -16,13 +16,13 @@ CHECKPOINTS = [
         # Secondary model for maximum date-detection accuracy.
         # Runs in parallel on each frame; its date detections are used
         # for OK/NOK validation alongside barcodes from the primary model.
-        "secondary_date_model_path": "yolo26-BB(date).pt",
+        "secondary_date_model_path": "yolo26m_BB_date.engine",
         "secondary_date_class":      "date",
     },
     {
         "id":            "anomaly",
         "label":         "Segmentation + Anomaly Detection",
-        "path":          "yolo26m_seg_farine_FV_v3.pt",
+        "path":          "yolo26m_seg_farine_FV_v3.engine",
         "task": "segment" # refers to YOLO segmentation part since task is required for TensorRT            
         "mode":          "anomaly",
         "package_class": "farine",
