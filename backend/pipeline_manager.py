@@ -58,7 +58,7 @@ def init_pipeline(pipe_cfg):
     # Per-pipeline stream resolution (overrides global STREAM_WIDTH/HEIGHT)
     state._stream_width   = pipe_cfg.get("stream_width",  STREAM_WIDTH)
     state._stream_height  = pipe_cfg.get("stream_height", STREAM_HEIGHT)
-    state.model = YOLO(checkpoint["path"])
+    state.model = YOLO(checkpoint["path"], task=checkpoint["task"])
     state.model.to(DEVICE)
     names = state.model.names
 
@@ -78,7 +78,7 @@ def init_pipeline(pipe_cfg):
     sec_cls = checkpoint.get("secondary_date_class")
     if sec_path and state.mode == "tracking":
         try:
-            state.secondary_model = YOLO(sec_path)
+            state.secondary_model = YOLO(sec_path, task="detect")
             state.secondary_model.to(DEVICE)
             sec_names = state.secondary_model.names
             state._secondary_date_id = next(

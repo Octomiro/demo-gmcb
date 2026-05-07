@@ -81,10 +81,6 @@ services:
     volumes:
       - /dev:/dev
       - ./data/liveImages:/app/liveImages
-      - ./data/videos:/app/videos
-      - /home/adam/YOLO_Benchmark/ultralytics/testAnomalie-Trim.mp4:/app/videos/testAnomalie-Trim.mp4:ro
-      - /home/adam/YOLO_Benchmark/ultralytics/testAnomalie-Trim3.mp4:/app/videos/testAnomalie-Trim3.mp4:ro
-      - /home/adam/YOLO_Benchmark/ultralytics/V1_comp.mp4:/app/videos/V1_comp.mp4:ro
       - ./data/feedback_screenshots:/app/feedback_screenshots
     deploy:
       resources:

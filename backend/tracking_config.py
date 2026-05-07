@@ -2,7 +2,8 @@ CHECKPOINTS = [
     {
         "id":            "barcode_date",
         "label":         "Tracking Paquet+Barcode+Date",
-        "path":          "yolo26m_BB_barcode_date.pt",
+        "path":          "yolo26m_BB_barcode_date.engine",
+        "task": "detect" # required for TensorRT
         "mode":          "tracking",
         "package_class": "package",
         "barcode_class": "barcode",
@@ -15,13 +16,14 @@ CHECKPOINTS = [
         # Secondary model for maximum date-detection accuracy.
         # Runs in parallel on each frame; its date detections are used
         # for OK/NOK validation alongside barcodes from the primary model.
-        "secondary_date_model_path": "yolo26-BB(date).pt",
+        "secondary_date_model_path": "yolo26m_BB_date.engine",
         "secondary_date_class":      "date",
     },
     {
         "id":            "anomaly",
         "label":         "Segmentation + Anomaly Detection",
-        "path":          "yolo26m_seg_farine_FV_v3.pt",
+        "path":          "yolo26m_seg_farine_FV_v3.engine",
+        "task": "segment" # refers to YOLO segmentation part since task is required for TensorRT            
         "mode":          "anomaly",
         "package_class": "farine",
         "barcode_class": None,
@@ -70,7 +72,6 @@ PIPELINES = [
     # Both cameras share Bus 001 (480 Mbps). At 1920x1080 complex scenes push
     # MJPEG frames to 200-400KB each → bus congestion → FPS drops.
     # EfficientAD runs at 256px internally so 1280x720 capture loses nothing.
-    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": "/app/videos/testAnomalie-Trim3.mp4", "checkpoint_id": "anomaly",
      "camera_width": 1280, "camera_height": 720},
 ]
 
