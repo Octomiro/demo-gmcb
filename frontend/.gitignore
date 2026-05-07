@@ -39,3 +39,8 @@ pids/
 # Misc
 .cache/
 .turbo/
+
+# Profiling
+backend/*.pstat
+backend/*.svg
+backend/run_profiling_*.py

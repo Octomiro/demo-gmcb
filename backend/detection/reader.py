@@ -64,6 +64,7 @@ class ReaderMixin:
 
     def _reader_loop(self, session_gen: int):
         """Read frames at native FPS. NEVER waits for YOLO. Always smooth."""
+        cap = None
         try:
             src = self.video_source
 
@@ -77,7 +78,6 @@ class ReaderMixin:
                 self._reader_loop_video_file(session_gen, src)
                 return
 
-            cap = None
             _is_rtsp = isinstance(src, str) and src.startswith("rtsp://")
             if _is_rtsp:
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"

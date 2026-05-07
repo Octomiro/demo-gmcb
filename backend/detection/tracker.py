@@ -259,6 +259,22 @@ class TrackerMixin:
                         elif effective_require_date and not has_dt:
                             self._nok_no_date += 1
 
+                        # Real-time websocket update
+                        try:
+                            from app import ws_stats_queue
+                            ws_stats_queue.put_nowait({
+                                "pipeline": "barcode_date",
+                                "total_packets": self.total_packets,
+                                "packages_ok": self._ok_count,
+                                "packages_nok": self._nok_count,
+                                "nok_no_barcode": self._nok_no_barcode,
+                                "nok_no_date": self._nok_no_date,
+                                "nok_anomaly": self._nok_anomaly,
+                                "session_id": self._db_session_id
+                            })
+                        except Exception:
+                            pass
+
                         if (
                             self._db_writer
                             and self._db_session_id

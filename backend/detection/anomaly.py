@@ -425,6 +425,23 @@ class AnomalyMixin:
                     if self._stats_active and is_def and anomaly_enabled:
                         self._nok_anomaly += 1
 
+                    # Real-time websocket update
+                    if self._stats_active:
+                        try:
+                            from app import ws_stats_queue
+                            ws_stats_queue.put_nowait({
+                                "pipeline": "anomaly",
+                                "total_packets": self.total_packets,
+                                "packages_ok": self._ok_count,
+                                "packages_nok": self._nok_count,
+                                "nok_no_barcode": 0,
+                                "nok_no_date": 0,
+                                "nok_anomaly": self._nok_anomaly,
+                                "session_id": self._db_session_id
+                            })
+                        except Exception:
+                            pass
+
                     if is_def and anomaly_enabled:
                         import logging as _logging
                         _logging.getLogger(__name__).debug(

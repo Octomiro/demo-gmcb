@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { backendApi, PRODUCTION_CADENCE } from "@/core/backendApi";
+import { io, Socket } from "socket.io-client";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -57,16 +58,14 @@ export interface LiveStats {
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-const POLL_MS = 1500;
-
 export function useLiveStats(): LiveStats {
   const [p0, setP0] = useState<PipelineStats | null>(null);
   const [p1, setP1] = useState<PipelineStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
-  const poll = useCallback(async () => {
+  const fetchInitial = useCallback(async () => {
     try {
       const [r0, r1] = await Promise.all([
         backendApi.getPipelineStats("pipeline_barcode_date") as Promise<PipelineStats>,
@@ -84,12 +83,37 @@ export function useLiveStats(): LiveStats {
   }, []);
 
   useEffect(() => {
-    poll();
-    intervalRef.current = setInterval(poll, POLL_MS);
+    fetchInitial();
+
+    // Connect to SocketIO server (same host)
+    const socket = io("", {
+      transports: ["websocket"],
+      reconnectionAttempts: 10,
+    });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      console.log("[WS] Connected to stats server");
+      setError(null);
+    });
+
+    socket.on("connect_error", (err) => {
+      console.error("[WS] Connection error:", err);
+      setError("Mode temps-réel indisponible (reconnexion...)");
+    });
+
+    socket.on("stats_update", (data: any) => {
+      if (data.pipeline === "barcode_date") {
+        setP0(prev => prev ? { ...prev, ...data } : data);
+      } else if (data.pipeline === "anomaly") {
+        setP1(prev => prev ? { ...prev, ...data } : data);
+      }
+    });
+
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      socket.disconnect();
     };
-  }, [poll]);
+  }, [fetchInitial]);
 
   // Barcode/date pipeline (p0) is the sole source of truth for packet count.
   // It is the last checkpoint on the line — every packet crosses it.
@@ -99,9 +123,8 @@ export function useLiveStats(): LiveStats {
   const nokDate = p0?.nok_no_date ?? 0;
   const nokAnomaly = p1?.nok_anomaly ?? 0;
   const totalNok = nokBarcode + nokDate + nokAnomaly;
-  // conformes = packets confirmed OK by p0 (barcode+date), minus anomaly NOKs from p1.
-  // Using packages_ok directly avoids negative counts when p0 total < sum of NOK types.
-  const conformes = Math.max(0, (p0?.packages_ok ?? 0) - nokAnomaly);
+  // conformes = packets that passed as OK at barcode/date checkpoint (p0).
+  const conformes = p0?.packages_ok ?? 0;
   const conformityPct =
     totalPackets > 0
       ? Math.round((conformes / totalPackets) * 100 * 100) / 100

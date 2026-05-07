@@ -19,6 +19,8 @@ import cv2
 import numpy as np
 from flask import Flask, jsonify, request, Response, render_template, send_file
 from flask_cors import CORS
+from flask_socketio import SocketIO
+from gevent.queue import Queue, Full
 
 from tracking_config import (
     CONFIG, SERVER_HOST, SERVER_PORT,
@@ -63,6 +65,25 @@ CORS(app, resources={r"/api/*": {"origins": "*"},
                      r"/video_feed": {"origins": "*"}})
 app.register_blueprint(auth_bp)
 app.register_blueprint(feedback_bp)
+
+# Real-time stats websocket
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+ws_stats_queue = Queue(maxsize=200)
+
+def stats_broadcaster():
+    """Background greenlet that watches the queue and emits stats to all clients."""
+    while True:
+        try:
+            # wait for a message from any pipeline
+            msg = ws_stats_queue.get()
+            # Broadcast to all connected clients
+            socketio.emit('stats_update', msg)
+        except Exception as e:
+            print(f"[WS] Broadcaster error: {e}")
+        gevent.sleep(0.01)
+
+# Start the broadcaster
+gevent.spawn(stats_broadcaster)
 
 
 # ==========================
@@ -1327,7 +1348,12 @@ def api_pipeline_stats(pipeline_id):
         src = cfg.get("camera_source")
         if src is None:
             return True
-        dev = f"/dev/video{src}" if isinstance(src, int) else str(src)
+        if isinstance(src, str) and not src.isdigit():
+            if src.startswith("rtsp://"):
+                return True
+            import os
+            return os.path.isfile(src)
+        dev = f"/dev/video{src}" if isinstance(src, int) else f"/dev/video{src}"
         return dev in set(_g.glob("/dev/video*"))
 
     st = pipelines.get(pipeline_id)
@@ -2010,10 +2036,5 @@ if __name__ == '__main__':
     print(f"  http://196.179.229.162:{SERVER_PORT}/")
     print("=" * 60 + "\n")
 
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-
-    from gevent.pywsgi import WSGIServer
-    http_server = WSGIServer((SERVER_HOST, SERVER_PORT), app, log=None)
-    print(f"[SERVER] gevent WSGIServer listening on {SERVER_HOST}:{SERVER_PORT}")
-    http_server.serve_forever()
+    print(f"[SERVER] SocketIO/Gevent server listening on {SERVER_HOST}:{SERVER_PORT}")
+    socketio.run(app, host=SERVER_HOST, port=SERVER_PORT, log_output=False)
