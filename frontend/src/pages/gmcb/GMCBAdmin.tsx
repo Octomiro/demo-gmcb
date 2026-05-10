@@ -1,13 +1,13 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   ShieldCheck, Play, Square, Repeat, Calendar, AlertCircle, Plus,
-  ChevronLeft, ChevronRight, Trash2, Loader2, Zap, Clock, X,
+  ChevronLeft, ChevronRight, Trash2, Loader2, Zap,
 } from "lucide-react";
 import {
   ADMIN_WEEKDAYS, ADMIN_SHIFT_OPTIONS,
-  todayIso, formatAdminDate, formatAdminMonth, addDays, formatTunisiaTime, formatStopCountdown,
+  todayIso, formatAdminDate, formatAdminMonth, addDays,
   weekdayKeyFromIso, getMonthDays, isPastIsoDate, sortWeekdays,
   getTunisiaCurrentMinutes,
   buildRuleSession, getSessionsForDate, getActiveSessions,
@@ -97,13 +97,6 @@ const GMCBAdmin = () => {
     draft: getDefaultRuleActionDraft(today),
   });
   const [shiftToDelete, setShiftToDelete] = useState<{ id: string, type: 'recurring' | 'single' } | null>(null);
-  const [sessionModalOpen, setSessionModalOpen] = useState(false);
-  const [scheduledStop, setScheduledStop] = useState<string | null>(null);
-  const [stopTimeInput, setStopTimeInput] = useState("");
-  const [adminStopPickerOpen, setAdminStopPickerOpen] = useState(false);
-  const [adminStopTimeInput, setAdminStopTimeInput] = useState("");
-  const [sessionStartedAt, setSessionStartedAt] = useState<string | null>(null);
-  const sessionStartedAtRef = useRef<string | null>(null);
 
   const selectedSessions = getSessionsForDate(selectedDate, recurringRules, oneOffSessions);
   const selectedActiveSessions = getActiveSessions(selectedSessions);
@@ -122,43 +115,6 @@ const GMCBAdmin = () => {
       : oneOffSessions.find((session) => session.id === shiftToDelete.id)?.name
     : null;
   const currentMinutes = getTunisiaCurrentMinutes(now);
-
-  // Track session start time
-  useEffect(() => {
-    if (stats.isRunning) {
-      if (!sessionStartedAtRef.current) {
-        const t = formatTunisiaTime(new Date(), true);
-        sessionStartedAtRef.current = t;
-        setSessionStartedAt(t);
-      }
-    } else {
-      sessionStartedAtRef.current = null;
-      setSessionStartedAt(null);
-      setScheduledStop(null);
-    }
-  }, [stats.isRunning]);
-
-  // Fetch scheduled stop when modal opens
-  useEffect(() => {
-    if (sessionModalOpen && stats.isRunning) {
-      backendApi.getScheduledStop().then(r => {
-        setScheduledStop(r.scheduled_stop);
-        if (r.scheduled_stop) {
-          const d = new Date(r.scheduled_stop);
-          setStopTimeInput(`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`);
-        }
-      }).catch(() => {});
-    }
-  }, [sessionModalOpen, stats.isRunning]);
-
-  // Keep scheduledStop in sync every 30s while session is running
-  useEffect(() => {
-    if (!stats.isRunning) { setScheduledStop(null); return; }
-    const sync = () => backendApi.getScheduledStop().then(r => setScheduledStop(r.scheduled_stop ?? null)).catch(() => {});
-    sync();
-    const id = setInterval(sync, 30_000);
-    return () => clearInterval(id);
-  }, [stats.isRunning]);
 
   useEffect(() => {
     if (!singleModalOpen && !selectedDateIsPast) {
@@ -190,8 +146,8 @@ const GMCBAdmin = () => {
     try {
       await backendApi.startAll();
       await backendApi.toggleRecording();
-    } catch {
-      toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors du démarrage");
     } finally {
       setSessionLoading(false);
     }
@@ -202,8 +158,8 @@ const GMCBAdmin = () => {
     try {
       await backendApi.toggleRecording();
       await backendApi.stopAll();
-    } catch {
-      toast.error("Impossible d'arrêter la session. Réessayez dans un instant.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de l'arrêt");
     } finally {
       setSessionLoading(false);
     }
@@ -214,8 +170,8 @@ const GMCBAdmin = () => {
       await backendApi.resetSessionGuard();
       setGuardStale(false);
       toast.success("Verrou de session réinitialisé — les shifts automatiques peuvent de nouveau démarrer.");
-    } catch {
-      toast.error("Réinitialisation échouée. Réessayez.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de la réinitialisation");
     }
   }
 
@@ -223,8 +179,8 @@ const GMCBAdmin = () => {
     try {
       await backendApi.prewarm();
       toast.success("Modèles pré-chargés — pipelines actifs, enregistrement en attente du début du shift.");
-    } catch {
-      toast.error("Impossible de pré-démarrer les modèles. Vérifiez la connexion au système.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors du pré-chargement");
     } finally {
       setPrewarmLoading(false);
     }
@@ -301,8 +257,8 @@ const GMCBAdmin = () => {
         // Preserve local variants, trimming days no longer in the rule
         const allowed = new Set(updated.weekdays);
         // variants are local-only; callers keep their own state
-      } catch {
-        toast.error("Impossible de modifier ce shift. Réessayez.");
+      } catch (e) {
+        toast.error((e as Error).message || "Erreur lors de la mise à jour");
         return;
       }
       setEditingRuleId(null); setRuleDraft(getDefaultRuleDraft(today)); setRecurringModalOpen(false); return;
@@ -316,23 +272,10 @@ const GMCBAdmin = () => {
         endDate: ruleDraft.endDate,
         weekdays: sortWeekdays(ruleDraft.weekdays),
       });
-    } catch (err: any) {
-      const raw = err?.message || "";
-      // Extract backend JSON error from thrown message like '...409: {"error":"..."}'
-      try {
-        const jsonStr = raw.substring(raw.indexOf("{"));
-        const parsed = JSON.parse(jsonStr);
-        if (parsed.error) {
-          toast.error(parsed.error, { duration: 8000 });
-        } else {
-          toast.error("Impossible de créer le shift. Réessayez.");
-        }
-      } catch {
-        toast.error("Impossible de créer le shift. Réessayez.");
-      }
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de la création");
       return;
     }
-    toast.success("Shift créé avec succès.");
     setRuleDraft(getDefaultRuleDraft(today)); setRecurringModalOpen(false);
   }
 
@@ -370,17 +313,11 @@ const GMCBAdmin = () => {
       setSingleDraft(getDefaultSingleDraft(selectedDate));
       setSingleModalOpen(false);
     } catch (e) {
-      const raw = (e as Error).message || "";
-      try {
-        const jsonStr = raw.substring(raw.indexOf("{"));
-        const parsed = JSON.parse(jsonStr);
-        if (parsed.error) {
-          toast.error(parsed.error, { duration: 8000 });
-        } else {
-          toast.error("Impossible de créer le créneau. Réessayez.");
-        }
-      } catch {
-        toast.error("Impossible de créer le créneau. Réessayez.");
+      const msg = (e as Error).message || "";
+      if (msg.includes("déjà passée")) {
+        toast.error("Création refusée : l'heure de début est déjà passée.");
+      } else {
+        toast.error(msg || "Erreur lors de la sauvegarde");
       }
     }
   }
@@ -398,8 +335,9 @@ const GMCBAdmin = () => {
         await removeOneOff(shiftToDelete.id);
         toast.success(`${shiftLabel || "Le shift"} supprimé avec succès`);
       }
-    } catch {
-      toast.error("Impossible de supprimer. Réessayez.");
+    } catch (e) {
+      console.error("Delete failed:", e);
+      toast.error((e as Error).message || "Erreur lors de la suppression");
     } finally {
       setShiftToDelete(null);
     }
@@ -423,8 +361,8 @@ const GMCBAdmin = () => {
     try {
       await updateOneOff(editingOneOffId, { start_time: oneOffEditDraft.start, end_time: oneOffEditDraft.end });
       setEditingOneOffId(null);
-    } catch {
-      toast.error("Impossible de sauvegarder les horaires. Réessayez.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de la sauvegarde");
     }
   }
 
@@ -463,8 +401,9 @@ const GMCBAdmin = () => {
           await createVariant(ruleId, { kind: "availability", active: false, startDate: selectedDate, endDate: selectedDate, weekdays: [wk] });
         }
       }
-    } catch {
-      toast.error("Impossible de modifier la disponibilité. Réessayez.");
+    } catch (e) {
+      console.error("[toggleRuleForSelectedDate] failed:", e);
+      toast.error("Erreur lors de la modification");
       await refreshAfterBatch();
     }
   }
@@ -512,8 +451,8 @@ const GMCBAdmin = () => {
       }
       toast.success("Horaires modifiés pour cette journée");
       setEditingRuleForDate(null);
-    } catch {
-      toast.error("Impossible de sauvegarder les horaires de ce jour. Réessayez.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de la sauvegarde");
     }
   }
 
@@ -564,8 +503,8 @@ const GMCBAdmin = () => {
       } else {
         await createVariant(selectedRuleForAction.id, draft);
       }
-    } catch {
-      toast.error("Impossible de sauvegarder la personnalisation. Réessayez.");
+    } catch (e) {
+      toast.error((e as Error).message || "Erreur lors de la sauvegarde");
       return;
     }
     closeRuleActionModal();
@@ -606,54 +545,9 @@ const GMCBAdmin = () => {
             </button>
           )}
           {stats.isRunning ? (
-            <>
-              {/* Programmer arrêt inline picker */}
-              <div style={{ position: "relative" }}>
-                {scheduledStop ? (
-                  <button
-                    onClick={async () => { await backendApi.scheduleStop(null); setScheduledStop(null); toast.success("Arrêt programmé annulé."); }}
-                    style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#92400e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-                    title="Cliquer pour annuler"
-                  >
-                    <Clock size={15} /> Arrêt à {formatTunisiaTime(scheduledStop)} <X size={13} />
-                  </button>
-                ) : (
-                  <button
-                    onClick={() => { setAdminStopPickerOpen(v => !v); }}
-                    style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: adminStopPickerOpen ? "#78350f" : "#b45309", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-                  >
-                    <Clock size={15} /> Programmer arrêt
-                  </button>
-                )}
-                {adminStopPickerOpen && !scheduledStop && (
-                  <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: "#fff", borderRadius: 12, border: "1px solid #e2e8f0", boxShadow: "0 8px 28px rgba(0,0,0,0.15)", padding: 16, zIndex: 200, minWidth: 230 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: "#475569", marginBottom: 10 }}>Heure d'arrêt automatique :</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input type="time" value={adminStopTimeInput} onChange={e => setAdminStopTimeInput(e.target.value)}
-                        style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 10px", fontSize: 14, fontWeight: 600 }} />
-                      <button
-                        disabled={!adminStopTimeInput}
-                        onClick={async () => {
-                          if (!adminStopTimeInput) return;
-                          try {
-                            const r = await backendApi.scheduleStop(adminStopTimeInput);
-                            setScheduledStop(r.scheduled_stop);
-                            setAdminStopPickerOpen(false);
-                            setAdminStopTimeInput("");
-                            toast.success(`Session s'arrêtera ${formatStopCountdown(r.scheduled_stop)}.`);
-                          } catch { toast.error("Erreur lors de la programmation."); }
-                        }}
-                        style={{ background: "#b45309", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: adminStopTimeInput ? "pointer" : "not-allowed", opacity: adminStopTimeInput ? 1 : 0.5 }}
-                      >OK</button>
-                    </div>
-                    <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>Heure locale Tunisie (Africa/Tunis)</div>
-                  </div>
-                )}
-              </div>
-              <button onClick={stopSession} disabled={sessionLoading} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#dc2626", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: sessionLoading ? 0.6 : 1 }}>
-                {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={15} />} Arrêter maintenant
-              </button>
-            </>
+            <button onClick={stopSession} disabled={sessionLoading} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#dc2626", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: sessionLoading ? 0.6 : 1 }}>
+              {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Square size={15} />} Arrêter maintenant
+            </button>
           ) : (
             <button onClick={() => startSession()} disabled={sessionLoading} style={{ border: "none", borderRadius: 12, padding: "10px 14px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: sessionLoading ? 0.6 : 1 }}>
               {sessionLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Play size={15} />} Démarrer une session
@@ -687,114 +581,11 @@ const GMCBAdmin = () => {
 
       {/* Stats */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14, marginBottom: 20 }}>
-        <div onClick={() => { if (stats.isRunning) setSessionModalOpen(true); }} style={{ cursor: stats.isRunning ? "pointer" : "default" }}>
-          <StatCard icon={<Play size={20} color="#0f766e" />} iconBg="#d1fae5" value={stats.isRunning ? "En cours" : stats.isPrewarmed ? "Préchauffé" : "En attente"} label={stats.isRunning ? "Session active — cliquer pour détails" : stats.isPrewarmed ? "Modèles actifs — enregistrement démarrera au début du shift" : "Prêt pour un démarrage manuel ou automatique"} />
-        </div>
+        <StatCard icon={<Play size={20} color="#0f766e" />} iconBg="#d1fae5" value={stats.isRunning ? "En cours" : stats.isPrewarmed ? "Préchauffé" : "En attente"} label={stats.isRunning ? "Session active — pipelines en cours d'exécution" : stats.isPrewarmed ? "Modèles actifs — enregistrement démarrera au début du shift" : "Prêt pour un démarrage manuel ou automatique"} />
         <StatCard icon={<Repeat size={20} color="#1d4ed8" />} iconBg="#dbeafe" value={activeRulesCount} label="Shifts automatiques actifs aujourd'hui" />
         <StatCard icon={<Calendar size={20} color="#b45309" />} iconBg="#fef3c7" value={todayActiveSessions.length} label="Shifts actifs aujourd'hui" />
         <StatCard icon={<AlertCircle size={20} color="#dc2626" />} iconBg="#fee2e2" value={exceptionCount} label="Exceptions et désactivations enregistrées" />
       </div>
-
-      {/* Session Info Modal */}
-      {sessionModalOpen && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(2,6,23,0.7)", backdropFilter: "blur(8px)", zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={() => setSessionModalOpen(false)}>
-          <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 20, width: 480, maxWidth: "94vw", padding: "28px 32px", boxShadow: "0 24px 80px rgba(0,0,0,0.3)" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: "#0f172a" }}>Session active</h3>
-              <button onClick={() => setSessionModalOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}><X size={18} color="#94a3b8" /></button>
-            </div>
-
-            {/* Session Info */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
-              <div style={{ padding: 14, borderRadius: 12, background: "#f0fdf4", border: "1px solid #bbf7d0" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#15803d", textTransform: "uppercase", marginBottom: 4 }}>Démarrée à</div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>{sessionStartedAt || "—"}</div>
-              </div>
-              <div style={{ padding: 14, borderRadius: 12, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>Paquets analysés</div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>{stats.totalPackets.toLocaleString()}</div>
-              </div>
-              <div style={{ padding: 14, borderRadius: 12, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", textTransform: "uppercase", marginBottom: 4 }}>Conformité</div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>{stats.conformityPct.toFixed(1)}%</div>
-              </div>
-              <div style={{ padding: 14, borderRadius: 12, background: "#fee2e2", border: "1px solid #fca5a5" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "#dc2626", textTransform: "uppercase", marginBottom: 4 }}>Anomalies</div>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "#dc2626" }}>{stats.totalNok}</div>
-              </div>
-            </div>
-
-            {/* Auto-stop scheduler */}
-            <div style={{ padding: 16, borderRadius: 12, background: "#fffbeb", border: "1px solid #fde68a", marginBottom: 20 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                <Clock size={16} color="#b45309" />
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#92400e" }}>Arrêt programmé</span>
-              </div>
-              {scheduledStop ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 14, color: "#0f172a" }}>
-                    La session s'arrêtera automatiquement à <strong>{formatTunisiaTime(scheduledStop)}</strong>
-                  </span>
-                  <button
-                    onClick={async () => {
-                      await backendApi.scheduleStop(null);
-                      setScheduledStop(null);
-                      toast.success("Arrêt programmé annulé.");
-                    }}
-                    style={{ background: "#fee2e2", border: "1px solid #fca5a5", borderRadius: 6, padding: "3px 8px", fontSize: 11, fontWeight: 700, color: "#dc2626", cursor: "pointer" }}
-                  >Annuler</button>
-                </div>
-              ) : (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <input
-                    type="time"
-                    value={stopTimeInput}
-                    onChange={e => setStopTimeInput(e.target.value)}
-                    style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "6px 10px", fontSize: 14, fontWeight: 600 }}
-                  />
-                  <button
-                    disabled={!stopTimeInput}
-                    onClick={async () => {
-                      if (!stopTimeInput) return;
-                      try {
-                        const r = await backendApi.scheduleStop(stopTimeInput);
-                        setScheduledStop(r.scheduled_stop);
-                        toast.success(`Session s'arrêtera ${formatStopCountdown(r.scheduled_stop)}.`);
-                      } catch { toast.error("Erreur lors de la programmation."); }
-                    }}
-                    style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: stopTimeInput ? "pointer" : "not-allowed", opacity: stopTimeInput ? 1 : 0.5 }}
-                  >Programmer</button>
-                </div>
-              )}
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: "flex", gap: 10 }}>
-              <button
-                onClick={() => { setSessionModalOpen(false); navigate("/clients/gmcb/qualite"); }}
-                style={{ flex: 1, padding: "10px 16px", borderRadius: 10, border: "1px solid #e2e8f0", background: "#f8fafc", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#0f172a" }}
-              >Voir le live</button>
-              <button
-                onClick={async () => {
-                  setSessionLoading(true);
-                  try {
-                    await backendApi.toggleRecording();
-                    await backendApi.stopAll();
-                    try { await backendApi.scheduleStop(null); } catch {}
-                    setSessionModalOpen(false);
-                    toast.success("Session arrêtée.");
-                  } catch { toast.error("Erreur lors de l'arrêt."); }
-                  finally { setSessionLoading(false); }
-                }}
-                disabled={sessionLoading}
-                style={{ flex: 1, padding: "10px 16px", borderRadius: 10, border: "none", background: "#dc2626", color: "#fff", fontSize: 13, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", opacity: sessionLoading ? 0.6 : 1 }}
-              >
-                {sessionLoading ? "Arrêt…" : "Arrêter maintenant"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Main grid */}
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 0.9fr", gap: 18, alignItems: "start" }}>
@@ -802,16 +593,8 @@ const GMCBAdmin = () => {
         <div style={{ display: "grid", gap: 18 }}>
           <DashboardPanel title="Contrôle live" subtitle="Démarrage immédiat, fermeture manuelle et visibilité sur la session en cours.">
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 14 }}>
-              <div
-                onClick={() => { if (stats.isRunning) setSessionModalOpen(true); }}
-                style={{ borderRadius: 16, padding: 18, background: "linear-gradient(135deg,#f0fdf4,#ecfeff)", border: "1px solid #d1fae5", cursor: stats.isRunning ? "pointer" : "default", transition: "box-shadow 0.15s" }}
-                onMouseEnter={e => { if (stats.isRunning) (e.currentTarget as HTMLDivElement).style.boxShadow = "0 4px 16px rgba(15,118,110,0.15)"; }}
-                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
-              >
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#0f766e", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Session active</div>
-                  {scheduledStop && <div style={{ fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fef3c7", padding: "2px 8px", borderRadius: 6 }}>⏱ Arrêt à {formatTunisiaTime(scheduledStop)}</div>}
-                </div>
+              <div style={{ borderRadius: 16, padding: 18, background: "linear-gradient(135deg,#f0fdf4,#ecfeff)", border: "1px solid #d1fae5" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#0f766e", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>Session active</div>
                 <div style={{ fontSize: 22, fontWeight: 800, color: "#0f172a", marginBottom: 8 }}>{stats.isRunning ? "En cours" : "Aucune"}</div>
                 <div style={{ fontSize: 13, color: "#64748b", lineHeight: 1.5 }}>
                   {stats.isRunning
@@ -946,16 +729,35 @@ const GMCBAdmin = () => {
               Aucun shift prévu ce jour. Vous pouvez ajouter un shift ponctuel ci-dessous.
             </div>
           ) : selectedSessions.map((session) => {
-            const selectedDayHistory = historyDays.find((d) => d.date === selectedDate);
-            const matchingHistorySession = selectedDayHistory?.sessions?.find(
-              (hs) => hs.shift_id === session.id || hs.shift_id === session.sourceId
-            );
-            const hasActuallyEnded = Boolean(matchingHistorySession?.ended_at);
-            const sessionEnded = hasActuallyEnded || selectedDate < today || (selectedDate === today && timeToMinutes(session.end) <= currentMinutes);
-            const sessionInProgress = !hasActuallyEnded && selectedDate === today && timeToMinutes(session.start) <= currentMinutes && !sessionEnded;
-            const sessionReadOnly = selectedDateIsPast || sessionEnded;
+            const thisDayHistory = historyDays.find(d => d.date === selectedDate)?.sessions || [];
+            const matchingHistory = thisDayHistory.find(hist => hist.shift_id === session.id || hist.shift_id === session.sourceId);
+
+            const scheduledStart = timeToMinutes(session.start);
+            const scheduledEnd = timeToMinutes(session.end);
+            const isToday = selectedDate === today;
+            const isPastDate = selectedDate < today;
+
+            let calcStatus = "En attente";
+            if (session.disabled) {
+              calcStatus = "Désactivé";
+            } else if (matchingHistory) {
+              calcStatus = matchingHistory.ended_at ? "Terminé" : "En cours";
+            } else if (isPastDate || (isToday && currentMinutes >= scheduledStart)) {
+              calcStatus = "Non démarré";
+            } else {
+              calcStatus = "En attente";
+            }
+
+            const sessionEnded = calcStatus === "Terminé";
+            const sessionInProgress = calcStatus === "En cours";
+            const sessionMissed = calcStatus === "Non démarré";
+            // If missed, but still in the time window today, we shouldn't block the "Démarrer" button completely, 
+            // but we consider it read-only if it's strictly in the past.
+            const isPastEnd = isPastDate || (isToday && currentMinutes >= scheduledEnd);
+            const sessionReadOnly = sessionEnded || isPastEnd || session.disabled;
+
             return (
-              <div key={session.id} style={{ border: `1px solid ${sessionReadOnly ? "#bbf7d0" : sessionInProgress ? "#99f6e4" : session.disabled ? "#fecaca" : "#e5e7eb"}`, background: sessionReadOnly ? "#f0fdf4" : sessionInProgress ? "#f0fdfa" : session.disabled ? "#fff7f7" : "#fff", borderRadius: 14, padding: 14 }}>
+              <div key={session.id} style={{ border: `1px solid ${sessionEnded ? "#bbf7d0" : sessionInProgress ? "#99f6e4" : sessionMissed ? "#ffedd5" : session.disabled ? "#fecaca" : "#e5e7eb"}`, background: sessionEnded ? "#f0fdf4" : sessionInProgress ? "#f0fdfa" : sessionMissed ? "#fff7ed" : session.disabled ? "#fff7f7" : "#fff", borderRadius: 14, padding: 14 }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
                   <div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
@@ -968,8 +770,13 @@ const GMCBAdmin = () => {
                     {session.disabled && <div style={{ fontSize: 12, color: "#dc2626", fontWeight: 700, marginTop: 6 }}>Désactivée pour cette date</div>}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "nowrap", whiteSpace: "nowrap" }}>
-                    {sessionReadOnly ? (
+                    {sessionMissed && !isPastEnd && !session.disabled && (
+                      <button onClick={() => startSession()} disabled={sessionLoading} style={{ border: "none", borderRadius: 8, padding: "6px 10px", background: "#0f766e", color: "#fff", fontSize: 12, fontWeight: 700, cursor: sessionLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 6, opacity: sessionLoading ? 0.6 : 1 }}><Play size={14} />Démarrer</button>
+                    )}
+                    {sessionEnded ? (
                       <div style={{ border: "1px solid #bbf7d0", background: "#f0fdf4", color: "#166534", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700 }}>Terminé</div>
+                    ) : sessionMissed ? (
+                      <div style={{ border: "1px solid #ffedd5", background: "#fff7ed", color: "#c2410c", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700 }}>Non démarré</div>
                     ) : sessionInProgress ? (
                       <div style={{ border: "1px solid #99f6e4", background: "#f0fdfa", color: "#0f766e", borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ width: 8, height: 8, borderRadius: 999, background: "#0d9488", display: "inline-block", animation: "pulse 1.5s infinite" }} />
@@ -1209,7 +1016,6 @@ const GMCBAdmin = () => {
           daySummary={historyDay}
           defectLabel={(t) => t === "nobarcode" ? "Absence CB" : t === "nodate" ? "Date non visible" : "Anomalie"}
           dayModalOrigin="admin"
-          canDelete={true}
           onClose={() => setHistoryDay(null)}
           onBackToCalendar={() => setHistoryDay(null)}
           onSessionClick={() => { setHistoryDay(null); navigate("/clients/gmcb/historique"); }}

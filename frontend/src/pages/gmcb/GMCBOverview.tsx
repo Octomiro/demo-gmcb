@@ -145,9 +145,23 @@ const GMCBOverview: React.FC = () => {
       const matchingHistory = matchingHistoryByShift ?? null;
       if (matchingHistory) usedHistoryIds.add(matchingHistory.id);
 
+      const scheduledStart = timeToMinutes(session.start);
       const scheduledEnd = timeToMinutes(session.end);
-      const isCompleted = Boolean(matchingHistory?.ended_at) || scheduledEnd <= currentMinutes;
-      const isRunningNow = stats.isRunning && !isCompleted && currentMinutes >= timeToMinutes(session.start) && currentMinutes < scheduledEnd;
+      
+      let calcStatus = "En attente";
+      if (session.disabled) {
+        calcStatus = "Désactivé";
+      } else if (matchingHistory) {
+        calcStatus = matchingHistory.ended_at ? "Terminé" : "En cours";
+      } else if (currentMinutes >= scheduledStart) {
+        calcStatus = "Non démarré";
+      } else {
+        calcStatus = "En attente";
+      }
+
+      const isCompleted = calcStatus === "Terminé" || calcStatus === "Non démarré";
+      const isRunningNow = calcStatus === "En cours";
+      
       const actualEndDate = parseBackendTimestamp(matchingHistory?.ended_at);
       const plannedDurationMinutes = Math.max(1, Math.round((plannedRange.end.getTime() - plannedRange.start.getTime()) / 60000));
       const interruptedMinutes = actualEndDate && actualEndDate.getTime() < plannedRange.end.getTime()
@@ -166,7 +180,7 @@ const GMCBOverview: React.FC = () => {
 
       return {
         ...session,
-        status: session.disabled ? "Désactivé" : isCompleted ? "Terminé" : isRunningNow ? "En cours" : "En attente",
+        status: calcStatus,
         matchedHistoryId: matchingHistory?.id ?? null,
         isInterrupted,
         interruptionPct,
@@ -242,7 +256,7 @@ const GMCBOverview: React.FC = () => {
           // Keep the original deletion error visible to the user.
         }
       }
-      toast.error("Impossible de supprimer ce shift. Réessayez.");
+      toast.error((error as Error).message || "Erreur lors de la suppression");
     } finally {
       setDeletingSessionId(null);
     }
@@ -302,118 +316,122 @@ const GMCBOverview: React.FC = () => {
       <main className="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           <h2 className="text-xl font-semibold">Aujourd'hui — {formatAdminDate(isoToday, { weekday: "long", day: "numeric", month: "short" })}</h2>
-          {(() => {
-              const activeShifts = todaySessionsWithStatus.filter((s) => s.status !== "Terminé");
-              const completedPlanned = todaySessionsWithStatus.filter((s) => s.status === "Terminé");
-              const activeSpontaneous = spontaneousTodaySessions.filter((s) => !s.ended_at);
-              const completedSpontaneous = spontaneousTodaySessions.filter((s) => Boolean(s.ended_at));
-              const nothingAtAll = todaySessionsWithStatus.length === 0 && spontaneousTodaySessions.length === 0;
-              const completedCount = completedPlanned.length + completedSpontaneous.length;
-
-              return (
-                <div className="mt-4 space-y-4">
-                  {nothingAtAll && (
-                    <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded text-sm text-slate-500">Aucun shift ni session aujourd'hui.</div>
-                  )}
-
-                  {/* ── Active / upcoming planned shifts ── */}
-                  {(activeShifts.length > 0 || activeSpontaneous.length > 0) && (
-                    <div className="space-y-3">
-                      {activeShifts.map((s) => (
-                        <div key={s.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
-                          <div>
-                            <div className="font-medium">{s.name}</div>
-                            <div className="text-sm text-slate-500">{s.start} - {s.end}</div>
-                          </div>
-                          <div className="text-sm font-medium px-3 py-1 rounded-full" style={{
-                            background: s.status === "En cours" ? "#dbeafe" : s.status === "Désactivé" ? "#fee2e2" : "#f8fafc",
-                            color: s.status === "En cours" ? "#1d4ed8" : s.status === "Désactivé" ? "#b91c1c" : "#475569",
-                            border: `1px solid ${s.status === "En cours" ? "#bfdbfe" : s.status === "Désactivé" ? "#fecaca" : "#e2e8f0"}`,
-                          }}>
-                            {s.status}
-                          </div>
-                        </div>
-                      ))}
-                      {activeSpontaneous.map((session) => (
-                        <div key={session.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
-                          <div>
-                            <div className="font-medium">Session non planifiée</div>
-                            <div className="text-sm text-slate-500">Début : {formatTunisiaTime(session.started_at)}</div>
-                          </div>
-                          <div className="text-sm font-medium px-3 py-1 rounded-full" style={{ background: "#dbeafe", color: "#1d4ed8", border: "1px solid #bfdbfe" }}>En cours</div>
-                        </div>
-                      ))}
+          <div className="mt-4 space-y-3">
+            {todaySessionsWithStatus.length === 0 && spontaneousTodaySessions.length === 0 && <div className="p-4 bg-slate-50 dark:bg-slate-900 rounded">Aucune session aujourd'hui.</div>}
+            {todaySessionsWithStatus.map((s) => (
+              <div key={s.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
+                <div>
+                  <div className="font-medium flex items-center gap-2 flex-wrap">
+                    <span>{s.name}</span>
+                    {s.isInterrupted && (
+                      <span
+                        title={s.interruptionTooltip}
+                        className="text-xs font-semibold px-2 py-1 rounded-full"
+                        style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74", cursor: "help" }}
+                      >
+                        Interrompu
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-sm text-slate-500">
+                    {s.start} - {s.end}
+                    {s.isInterrupted && (
+                      <span title={s.interruptionTooltip} style={{ color: "#c2410c", fontWeight: 600 }}>
+                        {" "}• {s.interruptionPct}% du temps prévu coupé
+                      </span>
+                    )}
+                  </div>
+                  {s.isInterrupted && (
+                    <div title={s.interruptionTooltip} className="text-xs mt-1" style={{ color: "#c2410c" }}>
+                      Arrêt réel à {s.interruptedAt}
                     </div>
                   )}
-
-                  {/* ── Sessions terminées ── */}
-                  {completedCount > 0 && (
-                    <>
-                      <div className="flex items-center gap-2 pt-1">
-                        <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Sessions terminées</h3>
-                        <span className="text-xs font-bold bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{completedCount}</span>
-                      </div>
-                      <div className="space-y-3">
-                        {completedPlanned.map((s) => (
-                          <div key={s.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
-                            <div>
-                              <div className="font-medium flex items-center gap-2 flex-wrap">
-                                <span>{s.name}</span>
-                                {s.isInterrupted && (
-                                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74" }}>Interrompue</span>
-                                )}
-                              </div>
-                              <div className="text-sm text-slate-500">
-                                {s.start} - {s.end}
-                                {s.isInterrupted && (
-                                  <span title={s.interruptionTooltip} style={{ color: "#c2410c", fontWeight: 600 }}>{" "}• {s.interruptionPct}% du temps prévu coupé</span>
-                                )}
-                              </div>
-                              {s.isInterrupted && (
-                                <div title={s.interruptionTooltip} className="text-xs mt-1" style={{ color: "#c2410c" }}>Arrêt réel à {s.interruptedAt}</div>
-                              )}
-                            </div>
-                            <div className="text-sm font-medium px-3 py-1 rounded-full" style={{ background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0", boxShadow: "0 8px 24px rgba(34,197,94,0.10)" }}>
-                              Terminé
-                            </div>
-                          </div>
-                        ))}
-                        {completedSpontaneous.map((session) => {
-                          const interrupted = isInterruptedHistorySession(session);
-                          return (
-                            <div key={session.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
-                              <div>
-                                <div className="font-medium flex items-center gap-2 flex-wrap">
-                                  <span>Session non planifiée</span>
-                                  {interrupted && (
-                                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74" }}>Interrompue</span>
-                                  )}
-                                </div>
-                                <div className="text-sm text-slate-500">{formatTunisiaTime(session.started_at)} – {formatTunisiaTime(session.ended_at)}</div>
-                              </div>
-                              <div className="text-sm font-medium px-3 py-1 rounded-full" style={{ background: "#dcfce7", color: "#166534", border: "1px solid #bbf7d0" }}>
-                                Terminé
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
                 </div>
-              );
-            })()}
+                <div
+                  className="text-sm font-medium px-3 py-1 rounded-full"
+                  style={{
+                    background:
+                      s.status === "Terminé" ? "#dcfce7"
+                      : s.status === "En cours" ? "#dbeafe"
+                      : s.status === "Désactivé" ? "#fee2e2"
+                      : s.status === "Non démarré" ? "#fff7ed"
+                      : "#f8fafc",
+                    color:
+                      s.status === "Terminé" ? "#166534"
+                      : s.status === "En cours" ? "#1d4ed8"
+                      : s.status === "Désactivé" ? "#b91c1c"
+                      : s.status === "Non démarré" ? "#c2410c"
+                      : "#475569",
+                    border: `1px solid ${
+                      s.status === "Terminé" ? "#bbf7d0"
+                      : s.status === "En cours" ? "#bfdbfe"
+                      : s.status === "Désactivé" ? "#fecaca"
+                      : s.status === "Non démarré" ? "#ffedd5"
+                      : "#e2e8f0"
+                    }`,
+                    boxShadow: s.status === "Terminé" ? "0 8px 24px rgba(34,197,94,0.10)" : "none",
+                  }}
+                >
+                  {s.status}
+                </div>
+              </div>
+            ))}
+
+            {spontaneousTodaySessions.length > 0 && (
+              <>
+                <h3 className="text-sm font-semibold text-slate-600 uppercase tracking-wide pt-2">Sessions instantanées</h3>
+                {spontaneousTodaySessions.map((session) => {
+                  const interrupted = isInterruptedHistorySession(session);
+                  const status = !session.ended_at ? "En cours" : interrupted ? "Interrompue" : "Terminée";
+
+                  return (
+                    <div key={session.id} className="p-4 bg-white/60 dark:bg-slate-800 border rounded-md flex items-center justify-between">
+                      <div>
+                        <div className="font-medium flex items-center gap-2 flex-wrap">
+                          <span>Session instantanée</span>
+                          <span className="text-xs font-semibold px-2 py-1 rounded-full" style={{ background: "#fef3c7", color: "#92400e", border: "1px solid #fcd34d" }}>
+                            Instantanée
+                          </span>
+                          {interrupted && (
+                            <span className="text-xs font-semibold px-2 py-1 rounded-full" style={{ background: "#fff7ed", color: "#c2410c", border: "1px solid #fdba74" }}>
+                              Interrompue
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-sm text-slate-500">Début réel: {formatTunisiaTime(session.started_at)} • Fin réelle: {formatTunisiaTime(session.ended_at)}</div>
+                        {interrupted && (
+                          <div className="text-xs mt-1" style={{ color: "#c2410c" }}>
+                            Session arrêtée de façon interrompue
+                          </div>
+                        )}
+                      </div>
+                      <div
+                        className="text-sm font-medium px-3 py-1 rounded-full"
+                        style={{
+                          background: status === "Terminée" ? "#dcfce7" : status === "Interrompue" ? "#fff7ed" : "#dbeafe",
+                          color: status === "Terminée" ? "#166534" : status === "Interrompue" ? "#c2410c" : "#1d4ed8",
+                          border: `1px solid ${status === "Terminée" ? "#bbf7d0" : status === "Interrompue" ? "#fdba74" : "#bfdbfe"}`,
+                        }}
+                      >
+                        {status}
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+          </div>
         </div>
 
         <aside className="lg:col-span-1">
           <Panel title={`Hier — ${formatAdminDate(isoYesterday, { day: "numeric", month: "short" })}`} open={expandedYesterday} onToggle={() => setExpandedYesterday((v) => !v)}>
             <div className="space-y-2">
               {!yesterdayHistory || yesterdayHistory.sessions.length === 0 ? (
-                <div className="p-2 text-sm text-slate-500">Aucune session terminée hier.</div>
+                <div className="p-2 text-sm text-slate-500">Aucun shift terminé hier.</div>
               ) : (
                 <>
                   <div className="p-2 rounded border bg-emerald-50/80 border-emerald-200 text-emerald-800 text-xs font-medium">
-                    {yesterdayHistory.sessionCount} session{yesterdayHistory.sessionCount > 1 ? "s" : ""} • {yesterdayHistory.totalPackets.toLocaleString()} paquets • {yesterdayHistory.totalAnomalies} anomalies
+                    {yesterdayHistory.sessionCount} shift{yesterdayHistory.sessionCount > 1 ? "s" : ""} • {yesterdayHistory.totalPackets.toLocaleString()} paquets • {yesterdayHistory.totalAnomalies} anomalies
                   </div>
                   {yesterdayHistory.sessions.map((session) => (
                     <div key={session.id} className="p-2 rounded border bg-white/70 dark:bg-slate-800 flex items-center justify-between">

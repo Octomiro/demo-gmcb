@@ -2,7 +2,7 @@ CHECKPOINTS = [
     {
         "id":            "barcode_date",
         "label":         "Tracking Paquet+Barcode+Date",
-        "path":          "yolo26m_BB_barcode_date.pt",
+        "path":          "gmcb_l640.pt",
         "mode":          "tracking",
         "package_class": "package",
         "barcode_class": "barcode",
@@ -55,18 +55,18 @@ DEFAULT_CHECKPOINT_ID = "barcode_date"
 # CAMERAS  (add your camera sources here)
 # ==========================
 CAMERAS = [
-    {"id": "cam0", "label": "Camera 0 (Barcode/Date)",  "source": 0},
-    {"id": "cam2", "label": "Camera 2 (Anomaly)",       "source": 2},
+    {"id": "cam3", "label": "Camera 3 (Barcode/Date)",  "source": "/app/data/videos/codeabarre3.mp4"},
+    {"id": "cam4", "label": "Camera 4 (Anomaly)",       "source": "/app/data/videos/anomalie4.mp4"},
 ]
 
-DEFAULT_CAMERA_ID = "cam0"
+DEFAULT_CAMERA_ID = "cam3"
 
 # ==========================
 # PIPELINES  (each pipeline = one camera + one checkpoint running in parallel)
 # ==========================
 PIPELINES = [
-    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": 0, "checkpoint_id": "barcode_date"},
-    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": 2, "checkpoint_id": "anomaly"},
+    {"id": "pipeline_barcode_date", "label": "Barcode + Date Tracking", "camera_source": "/app/data/videos/codeabarre3.mp4", "checkpoint_id": "barcode_date"},
+    {"id": "pipeline_anomaly",      "label": "Anomaly Detection",       "camera_source": "/app/data/videos/anomalie4.mp4", "checkpoint_id": "anomaly"},
 ]
 
 DEFAULT_VIEW_PIPELINE = "pipeline_barcode_date"
@@ -122,7 +122,7 @@ SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5000
 
 # ==========================
-DETECTOR_FRAME_SKIP = 2
+DETECTOR_FRAME_SKIP = 1
 
 #(segmentation + EfficientAD),
 ANOMALY_FRAME_SKIP = 3
