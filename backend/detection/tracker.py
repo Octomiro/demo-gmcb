@@ -22,6 +22,7 @@ class TrackerMixin:
 
         # ── Extract tracked packages, barcode and date detections ──
         tracks = []
+        package_dets = []
         barcode_dets = []
         date_dets = []
 
@@ -44,6 +45,7 @@ class TrackerMixin:
                 conf = float(b.conf)
                 x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
                 if self.package_id is not None and cls == self.package_id and conf >= self.current_checkpoint.get("conf_paquet", CONFIG.get("conf_paquet")):
+                    package_dets.append((int(x1), int(y1), int(x2), int(y2)))
                     tid = int(box_ids[i]) if box_ids is not None else -1
                     if tid >= 0:
                         tracks.append([int(x1), int(y1), int(x2), int(y2), tid])
@@ -84,6 +86,22 @@ class TrackerMixin:
                     break
             if not duplicate:
                 all_date_dets.append(cand)
+
+        # ── Filter dates and barcodes to only keep those intersecting a package ──
+        # This removes false positive dates/barcodes detected on the factory floor or belt
+        filtered_dates = []
+        for d in all_date_dets:
+            db = (d[0], d[1], d[2], d[3])
+            if any(self._det_box_matches_package(db, pb, "date") for pb in package_dets):
+                filtered_dates.append(d)
+        all_date_dets = filtered_dates
+
+        filtered_barcodes = []
+        for b in barcode_dets:
+            bb = (b[0], b[1], b[2], b[3])
+            if any(self._det_box_matches_package(bb, pb, "barcode") for pb in package_dets):
+                filtered_barcodes.append(b)
+        barcode_dets = filtered_barcodes
 
         # ── Per-track processing ──
         track_boxes = []
