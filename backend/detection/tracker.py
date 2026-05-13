@@ -9,6 +9,147 @@ class TrackerMixin:
     """Methods mixed into TrackingState for mode='tracking'."""
 
     # ─────────────────────────────────────────
+    # PACKAGE-CROP FALLBACK (digital zoom)
+    # ─────────────────────────────────────────
+
+    def _track_progress_pct(self, bbox, frame):
+        """Return package progress through the field, measured from the entry side.
+
+        Matches the exit-line orientation/inversion so "progress" always means
+        "distance from entry toward the exit line".
+        """
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = bbox
+        if self._exit_line_vertical:
+            ref = max(1, w)
+            center = (x1 + x2) / 2.0
+        else:
+            ref = max(1, h)
+            center = (y1 + y2) / 2.0
+        if self._exit_line_inverted:
+            return max(0.0, min(100.0, ((ref - center) / ref) * 100.0))
+        return max(0.0, min(100.0, (center / ref) * 100.0))
+
+    def _crop_box_with_margin(self, bbox, frame_shape, margin_pct):
+        """Return a clamped package-crop bbox with proportional padding."""
+        h, w = frame_shape[:2]
+        x1, y1, x2, y2 = bbox
+        bw = max(1, x2 - x1)
+        bh = max(1, y2 - y1)
+        pad_x = int(round(bw * margin_pct))
+        pad_y = int(round(bh * margin_pct))
+        cx1 = max(0, int(round(x1 - pad_x)))
+        cy1 = max(0, int(round(y1 - pad_y)))
+        cx2 = min(w, int(round(x2 + pad_x)))
+        cy2 = min(h, int(round(y2 + pad_y)))
+        return cx1, cy1, cx2, cy2
+
+    def _run_package_crop_fallback(self, frame, pkg, bbox, require_date_for_ok,
+                                   barcode_dets, all_date_dets):
+        """Run a native-resolution package-crop inference to recover missing
+        barcode/date signals that were lost to the global 640px letterbox.
+
+        Returns True iff the fallback actually ran (so the caller can decrement
+        its per-frame budget). The per-package attempt counter is incremented
+        on every run, capped by ``crop_fallback_max_per_package``.
+        """
+        cfg = CONFIG
+        if not cfg.get("crop_fallback_enabled", False):
+            return False
+
+        missing_barcode = not pkg.get("barcode_detected", False)
+        missing_date = require_date_for_ok and not pkg.get("date_detected", False)
+        if not (missing_barcode or missing_date):
+            return False
+
+        # Per-package attempt cap — after this many tries the symbol
+        # genuinely isn't on this packet.
+        max_per_pkg = int(cfg.get("crop_fallback_max_per_package", 5))
+        attempts = int(pkg.get("crop_fallback_attempts", 0))
+        if max_per_pkg > 0 and attempts >= max_per_pkg:
+            return False
+
+        progress_pct = self._track_progress_pct(bbox, frame)
+        trigger_pct = float(cfg.get("crop_fallback_trigger_pct", 50))
+        if progress_pct < trigger_pct:
+            return False
+
+        margin_pct = float(cfg.get("crop_fallback_margin_pct", 0.30))
+        cx1, cy1, cx2, cy2 = self._crop_box_with_margin(bbox, frame.shape, margin_pct)
+
+        min_size = int(cfg.get("crop_fallback_min_size", 32))
+        if (cx2 - cx1) < min_size or (cy2 - cy1) < min_size:
+            return False
+
+        crop = frame[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            return False
+
+        conf_barcode = float(cfg.get("crop_fallback_conf_barcode",
+                                     CONFIG.get("conf_barcode", 0.45)))
+        conf_date = float(cfg.get("crop_fallback_conf_date",
+                                  CONFIG.get("conf_date", 0.30)))
+        # Use the most permissive threshold so a single crop pass can pick
+        # up either symbol; filter per-class below.
+        crop_conf = min(
+            conf_barcode if missing_barcode else 1.0,
+            conf_date if missing_date else 1.0,
+        )
+        crop_imgsz = int(cfg.get("crop_fallback_imgsz", CONFIG.get("imgsz", 640)))
+
+        try:
+            crop_results = self.model.predict(
+                crop,
+                half=False,
+                conf=crop_conf,
+                imgsz=crop_imgsz,
+                verbose=False,
+            )[0]
+        except Exception as crop_err:
+            print(f"[DETECTOR] Package crop fallback error: {crop_err}")
+            # Count the attempt so we don't retry forever on a bad frame.
+            pkg["crop_fallback_attempts"] = attempts + 1
+            return False
+
+        # The run counts regardless of whether we found anything.
+        pkg["crop_fallback_attempts"] = attempts + 1
+
+        if crop_results.boxes is None:
+            return True
+
+        for b in crop_results.boxes:
+            cls = int(b.cls)
+            conf = float(b.conf)
+            x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
+            # Remap back to full-frame coords.
+            det_box = (
+                float(x1 + cx1), float(y1 + cy1),
+                float(x2 + cx1), float(y2 + cy1),
+            )
+
+            if (missing_barcode and self.barcode_id is not None
+                    and cls == self.barcode_id and conf >= conf_barcode
+                    and self._det_box_matches_package(det_box, bbox, "barcode")):
+                pkg["barcode_detected"] = True
+                barcode_dets.append([det_box[0], det_box[1], det_box[2], det_box[3], conf])
+                missing_barcode = False
+
+            if (missing_date and self.date_id is not None
+                    and cls == self.date_id and conf >= conf_date
+                    and self._det_box_matches_package(det_box, bbox, "date")):
+                pkg["date_detected"] = True
+                all_date_dets.append([
+                    int(det_box[0]), int(det_box[1]),
+                    int(det_box[2]), int(det_box[3]), conf,
+                ])
+                missing_date = False
+
+            if not missing_barcode and not missing_date:
+                break
+
+        return True
+
+    # ─────────────────────────────────────────
     # TRACKING-MODE FRAME PROCESSOR
     # ─────────────────────────────────────────
 
@@ -22,6 +163,7 @@ class TrackerMixin:
 
         # ── Extract tracked packages, barcode and date detections ──
         tracks = []
+        package_dets = []
         barcode_dets = []
         date_dets = []
 
@@ -48,6 +190,7 @@ class TrackerMixin:
                 conf = float(b.conf)
                 x1, y1, x2, y2 = b.xyxy[0].cpu().numpy()
                 if self.package_id is not None and cls == self.package_id and conf >= self.current_checkpoint.get("conf_paquet", CONFIG.get("conf_paquet")):
+                    package_dets.append((int(x1), int(y1), int(x2), int(y2)))
                     tid = int(box_ids[i]) if box_ids is not None else -1
                     if tid >= 0:
                         tracks.append([int(x1), int(y1), int(x2), int(y2), tid])
@@ -94,9 +237,34 @@ class TrackerMixin:
             if not duplicate:
                 all_date_dets.append(cand)
 
+        # ── Package-gated filter ──
+        # Drop barcode/date detections that do not sit inside any tracked
+        # package. These are almost always conveyor-line false positives
+        # (e.g. numbers printed on the belt). The same inside-match rule
+        # used for per-track association is reused here.
+        if CONFIG.get("package_gated_filter", True) and package_dets:
+            filtered_dates = [
+                d for d in all_date_dets
+                if any(
+                    self._det_box_matches_package((d[0], d[1], d[2], d[3]), pb, "date")
+                    for pb in package_dets
+                )
+            ]
+            all_date_dets = filtered_dates
+
+            filtered_barcodes = [
+                b for b in barcode_dets
+                if any(
+                    self._det_box_matches_package((b[0], b[1], b[2], b[3]), pb, "barcode")
+                    for pb in package_dets
+                )
+            ]
+            barcode_dets = filtered_barcodes
+
         # ── Per-track processing ──
         track_boxes = []
         require_date_for_ok = bool((self.current_checkpoint or {}).get("require_date_for_ok", False))
+        crop_fallback_budget = int(CONFIG.get("crop_fallback_max_per_frame", 0))
 
         for t in tracks:
             x1, y1, x2, y2, tid = int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4])
@@ -125,6 +293,7 @@ class TrackerMixin:
                     "first_frame": frame_idx,
                     "pre_line_seen": False,
                     "last_seen_frame": frame_idx,
+                    "crop_fallback_attempts": 0,
                 }
 
             pkg = self.packages[tid]
@@ -148,6 +317,23 @@ class TrackerMixin:
                     if self._det_box_matches_package(det_box, bbox, "date"):
                         pkg["date_detected"] = True
                         break
+
+            # ── Crop fallback: recover barcode/date missed by the global
+            # 640px letterbox. Only runs once the package is past the
+            # trigger % of the field, and is budgeted both per-frame and
+            # per-package (see tracking_config.CONFIG).
+            if crop_fallback_budget > 0 and not pkg.get("decision_locked"):
+                needs_crop = (
+                    not pkg.get("barcode_detected", False)
+                    or (require_date_for_ok and not pkg.get("date_detected", False))
+                )
+                if needs_crop:
+                    used_crop = self._run_package_crop_fallback(
+                        frame, pkg, bbox, require_date_for_ok,
+                        barcode_dets, all_date_dets,
+                    )
+                    if used_crop:
+                        crop_fallback_budget -= 1
 
             if pkg["decision_locked"]:
                 color = (255, 165, 0)
@@ -299,6 +485,10 @@ class TrackerMixin:
                                 if self._db_writer:
                                     self._db_writer.log_dropped("crossing")
 
+                    # Push to SSE bus immediately on every crossing so the
+                    # dashboard reflects the new count without a 1.5s poll.
+                    self._publish_stats(force=True)
+
         # ── Prune stale decided tracks every 100 frames to prevent O(n²) growth ──
         if frame_idx % 100 == 0:
             stale_threshold = frame_idx - 150  # not seen for 150+ frames = gone
@@ -357,3 +547,7 @@ class TrackerMixin:
             })
         with self._perf_lock:
             self._perf["detector_loop_ms"] = round(det_ms, 2)
+
+        # Throttled SSE heartbeat — keeps FPS/inference cards fresh at ~2 Hz
+        # without spamming subscribers on every frame.
+        self._publish_stats(force=False)

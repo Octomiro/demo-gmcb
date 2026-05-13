@@ -1241,8 +1241,11 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
           <Pager page={anomPage} total={totalPages} onChange={setAnomalPage} />
         </div>
         {crossLoading && <div style={{ fontSize: 13, color: "#0369a1", padding: 8 }}>Chargement des anomalies…</div>}
-        {pageAnom.map((a, i) => (
-          <div key={i} onClick={() => setModalAnomaly(a)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 14px", borderRadius: 10, background: "#fef2f2", marginBottom: 8, cursor: "pointer" }}>
+        {pageAnom.map((a, i) => {
+          const sessionDate = new Date(parseBackendTimestamp(session.date));
+          const isOlderThan14Days = (new Date().getTime() - sessionDate.getTime()) > 14 * 24 * 60 * 60 * 1000;
+          return (
+          <div key={i} onClick={() => !isOlderThan14Days && setModalAnomaly(a)} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "11px 14px", borderRadius: 10, background: "#fef2f2", marginBottom: 8, cursor: isOlderThan14Days ? "default" : "pointer", opacity: isOlderThan14Days ? 0.8 : 1 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <AlertCircle size={16} color="#ef4444" />
               <div>
@@ -1250,11 +1253,8 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
                 <div style={{ fontSize: 11, color: "#999" }}>{a.time} • Paquet {a.lot}</div>
               </div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <ChevronRight size={14} color="#ccc" />
-            </div>
           </div>
-        ))}
+        )})}
       </div>
 
       {/* Résultats + Critères */}
@@ -1475,6 +1475,15 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
 
       {/* Gallery Anomalies */}
       {crossings.length > 0 && (() => {
+        // If the session is older than 14 days, images are permanently purged.
+        // Hide the gallery completely. Let's do a simple time check:
+        const sessionDate = new Date(parseBackendTimestamp(session.date));
+        const now = new Date();
+        const diffMs = now.getTime() - sessionDate.getTime();
+        const isOlderThan14Days = diffMs > 14 * 24 * 60 * 60 * 1000;
+        
+        if (isOlderThan14Days) return null;
+
         const GALLERY_DEFAULT = 10;
         const galleryFiltered = activeFilter === "Tous" ? anomalyItems
           : anomalyItems.filter((a) => a.category === activeFilter);

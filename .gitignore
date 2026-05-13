@@ -4,8 +4,11 @@
 .env.*.local
 
 # ── ML model weights (large binaries — store separately) ──
-backend/*.pth
-backend/*.pt
+*.pth
+*.pt
+*.onnx
+*.engine
+.kiro/
 
 # ── Python ──
 __pycache__/

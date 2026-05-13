@@ -9,6 +9,7 @@ import numpy as np
 
 from db_writer import DBWriter, SNAPSHOT_EVERY_N_PACKETS
 from helpers import calculate_bbox_metrics, letterbox_image, LIVE_IMAGES_ROOT
+from stats_bus import stats_bus
 from tracking_config import (
     CONFIG, JPEG_QUALITY,
     CAMERA_FPS, CAMERA_WIDTH, CAMERA_HEIGHT,
@@ -175,6 +176,11 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         # totals reflect only the recording window.
         self._session_baseline_total = 0
         self._session_baseline_ok = 0
+
+        # ── SSE stats-bus throttle ──
+        # Last monotonic timestamp at which _publish_stats() emitted a
+        # non-forced event. Crossings bypass this and always emit.
+        self._last_sse_ms = 0.0
 
     # ─────────────────────────────────────────
     # STATIC HELPERS
@@ -394,6 +400,61 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         }
 
     # ─────────────────────────────────────────
+    # SSE PUBLISH (realtime stats)
+    # ─────────────────────────────────────────
+
+    # Minimum gap between non-forced publishes (seconds). Crossings bypass
+    # this and always emit. 0.5 s = 2 Hz for FPS/inference cards — plenty
+    # for a human-facing dashboard, negligible CPU.
+    _SSE_MIN_INTERVAL = 0.5
+
+    def _publish_stats(self, *, force: bool = False) -> None:
+        """Snapshot current stats and broadcast on the SSE bus.
+
+        Safe to call from detection threads. Non-blocking. Never raises.
+        Pass ``force=True`` on crossing events so the UI updates immediately
+        regardless of the throttle.
+        """
+        try:
+            now = time.monotonic()
+            if not force and (now - self._last_sse_ms) < self._SSE_MIN_INTERVAL:
+                return
+            self._last_sse_ms = now
+
+            with self._stats_lock:
+                stats_snap = dict(self.stats)
+            with self._perf_lock:
+                perf_snap = dict(self._perf)
+
+            payload = {
+                "pipeline_id":     self.pipeline_id,
+                "is_running":      self.is_running,
+                "stats_active":    self._stats_active,
+                "session_id":      self._db_session_id,
+                "total_packets":   self.total_packets,
+                "packages_ok":     self._ok_count,
+                "packages_nok":    self._nok_count,
+                "nok_no_barcode":  self._nok_no_barcode,
+                "nok_no_date":     self._nok_no_date,
+                "nok_anomaly":     self._nok_anomaly,
+                "fifo_queue":      list(self.output_fifo)[-20:],
+                "enabled_checks":  dict(self._enabled_checks),
+                "perf": {
+                    "video_fps":    stats_snap.get("video_fps", 0),
+                    "det_fps":      stats_snap.get("det_fps", 0),
+                    "inference_ms": stats_snap.get("inference_ms", 0),
+                    **{k: v for k, v in perf_snap.items()
+                       if k in ("detector_loop_ms", "compositor_ms")},
+                },
+                "checkpoint_label": (self.current_checkpoint or {}).get("label", ""),
+                "source":           "crossing" if force else "tick",
+            }
+            stats_bus.publish(payload)
+        except Exception as e:
+            # A realtime channel must never take down the detection loop.
+            print(f"[SSE] publish error ({self.pipeline_id}): {e}")
+
+    # ─────────────────────────────────────────
     # STATS RECORDING
     # ─────────────────────────────────────────
 
@@ -566,7 +627,8 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         # Load new model
         print(f"[SWITCH] Loading checkpoint: {checkpoint['label']} ({checkpoint['path']})")
         from tracking_config import DEVICE
-        self.model = YOLO(checkpoint["path"])
+        # NOTE: TensorRT patch fix
+        self.model = YOLO(checkpoint["path"], checkpoint["task"]) 
         self.model.to(DEVICE)
         names = self.model.names
 
@@ -596,11 +658,11 @@ class TrackingState(AnomalyMixin, TrackerMixin, ReaderMixin, CompositorMixin):
         sec_cls  = checkpoint.get("secondary_date_class")
         if sec_path and self.mode == "tracking":
             print(f"[SWITCH] Loading secondary date model: {sec_path}")
-            self.secondary_model = YOLO(sec_path)
+            self.secondary_model = YOLO(sec_path, task="detect") # TensorRT patch fix
             try:
-                self.secondary_model.to(DEVICE)
+               self.secondary_model.to(DEVICE)
             except Exception:
-                pass
+               pass
             sec_names = self.secondary_model.names
             self._secondary_date_id = next(
                 (k for k, v in sec_names.items() if v == sec_cls), None

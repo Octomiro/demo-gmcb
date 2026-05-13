@@ -446,12 +446,12 @@ def _load_all_shift_jobs():
 
 
 def cleanup_old_proof_images():
-    """Delete proof image directories older than 7 days."""
+    """Delete proof image directories older than 14 days."""
     import shutil
     live_root = LIVE_IMAGES_ROOT
     if not live_root.is_dir():
         return
-    cutoff = time.time() - 7 * 86400
+    cutoff = time.time() - 14 * 86400
     removed = 0
     for entry in live_root.iterdir():
         if not entry.is_dir():
@@ -464,4 +464,4 @@ def cleanup_old_proof_images():
         except Exception as e:
             print(f"[CLEANUP] Failed to remove {entry.name}: {e}")
     if removed:
-        print(f"[CLEANUP] Removed {removed} proof image folder(s) older than 7 days")
+        print(f"[CLEANUP] Removed {removed} proof image folder(s) older than 14 days")

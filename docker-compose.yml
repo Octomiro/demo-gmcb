@@ -17,7 +17,7 @@ services:
       POSTGRES_USER:     ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     ports:
-      - "127.0.0.1:5434:5432"
+      - "127.0.0.1:5435:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./database/db_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
@@ -41,7 +41,9 @@ services:
       network: host
     ports:
       - "5000:5000"
+    image: demo-gmcb-backend:v5
     container_name: gmcb_backend
+    privileged: true
     restart: always
     runtime: nvidia
     logging:
@@ -102,6 +104,7 @@ services:
     build:
       context: ./frontend
       network: host
+    image: demo-gmcb-frontend:v5
     container_name: gmcb_frontend
     restart: always
     logging:

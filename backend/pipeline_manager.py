@@ -58,8 +58,8 @@ def init_pipeline(pipe_cfg):
     # Per-pipeline stream resolution (overrides global STREAM_WIDTH/HEIGHT)
     state._stream_width   = pipe_cfg.get("stream_width",  STREAM_WIDTH)
     state._stream_height  = pipe_cfg.get("stream_height", STREAM_HEIGHT)
-    state.model = YOLO(checkpoint["path"], task=checkpoint["task"])
-    state.model.to(DEVICE)
+    state.model = YOLO(checkpoint["path"])
+    state.model.to(DEVICE) # only needed for pytorch models, TensorRT engine is already on GPU
     names = state.model.names
 
     pkg_cls = checkpoint.get("package_class")
@@ -78,8 +78,8 @@ def init_pipeline(pipe_cfg):
     sec_cls = checkpoint.get("secondary_date_class")
     if sec_path and state.mode == "tracking":
         try:
-            state.secondary_model = YOLO(sec_path, task="detect")
-            state.secondary_model.to(DEVICE)
+            state.secondary_model = YOLO(sec_path)
+            state.secondary_model.to(DEVICE) # only needed for pytorch models, TensorRT engine is already on GPU
             sec_names = state.secondary_model.names
             state._secondary_date_id = next(
                 (k for k, v in sec_names.items() if v == sec_cls), None

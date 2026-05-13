@@ -21,9 +21,9 @@ class AnomalyMixin:
         from torchvision import transforms
         from anomaly_inference import get_ad_constants
 
-        ad_teacher_path = checkpoint.get("ad_teacher", "teacher_best.pth")
-        ad_student_path = checkpoint.get("ad_student", "student_best.pth")
-        ad_ae_path = checkpoint.get("ad_autoencoder", "autoencoder_best.pth")
+        ad_teacher_path = checkpoint.get("ad_teacher", "teacher_best_v1.pth")
+        ad_student_path = checkpoint.get("ad_student", "student_best_v1.pth")
+        ad_ae_path = checkpoint.get("ad_autoencoder", "autoencoder_best_v1.pth")
         ad_imgsz = checkpoint.get("ad_imgsz", 256)
 
         print(f"[SWITCH] Loading EfficientAD models...")
@@ -474,6 +474,8 @@ class AnomalyMixin:
 
                     pkt_num = self.packet_numbers.get(tid)
                     self._csv_write_packet(pkt_num, tid, is_def, _scores_snap, _n_scans)
+                    # Push to SSE bus on every anomaly crossing.
+                    self._publish_stats(force=True)
                     if is_def:
                         label = f"#{pkt_num} DEFECTIVE" if pkt_num else f"T{tid} DEFECTIVE"
                         color = (0, 0, 255)
@@ -536,3 +538,6 @@ class AnomalyMixin:
             })
         with self._perf_lock:
             self._perf["detector_loop_ms"] = round(det_ms, 2)
+
+        # Throttled SSE heartbeat — same cadence as tracking mode.
+        self._publish_stats(force=False)

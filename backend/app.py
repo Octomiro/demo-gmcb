@@ -339,6 +339,73 @@ def api_perf():
     })
 
 
+# ──────────────────────────────────────────────────────────────
+# SSE REALTIME STATS
+# ──────────────────────────────────────────────────────────────
+# One-way push replacement for the old 1.5s polling. Each detection pipeline
+# publishes a stats snapshot on crossings (forced) and on a ~2 Hz heartbeat.
+# The bus lives in memory; subscribers are per-HTTP-connection.
+
+from stats_bus import stats_bus, iter_sse
+
+
+@app.route('/api/stats/stream')
+def api_stats_stream():
+    """Server-Sent Events stream of per-pipeline stats snapshots.
+
+    Event format (one per frame):
+        event: stats
+        data: {"pipeline_id":"pipeline_barcode_date","total_packets":42,...}
+
+    A ``: ping`` comment is emitted every 15s when idle so NAT/proxies keep
+    the connection open.
+    """
+    def _serialize(d):
+        # Compact output — keeps wire size down without changing meaning.
+        return json.dumps(d, separators=(',', ':'), default=str)
+
+    sub = stats_bus.subscribe()
+
+    # Kick every pipeline to emit a primer event so the client paints as
+    # soon as the connection opens, without waiting for the first crossing
+    # or the 2 Hz tick.
+    for _pid, _st in _all_states():
+        try:
+            _st._publish_stats(force=True)
+        except Exception:
+            pass
+
+    def _generate():
+        try:
+            # Opening comment flushes headers past any buffering proxy.
+            yield b": connected\n\n"
+            yield from iter_sse(
+                sub,
+                serialize=_serialize,
+                sleeper=gevent.sleep,
+                heartbeat_interval=15.0,
+                poll_timeout=0.25,
+            )
+        finally:
+            stats_bus.unsubscribe(sub)
+
+    resp = Response(
+        _generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            # Nginx-specific: disable response buffering for this location.
+            'X-Accel-Buffering': 'no',
+            # Keep the connection open indefinitely — the client reconnects
+            # automatically on drop.
+            'Connection': 'keep-alive',
+        },
+    )
+    return resp
+
+
 @app.route('/api/stats/status')
 def api_stats_status():
     state = _view_state()
@@ -597,40 +664,89 @@ def api_session_update_checks():
         if st.is_running:
             st.set_enabled_checks(new_checks)
 
-    # When anomaly check changes, actually start/stop the anomaly pipeline
-    anomaly_was_on = old_checks.get("anomaly", True)
-    anomaly_now_on = new_checks["anomaly"]
-    if anomaly_was_on != anomaly_now_on:
-        st_anomaly = pipelines.get("pipeline_anomaly")
-        if st_anomaly is not None:
-            if not anomaly_now_on:
-                # OFF → fully stop the anomaly pipeline
-                if getattr(st_anomaly, "_stats_active", False):
-                    st_anomaly.set_stats_recording(False, end_reason="check_disabled")
-                if st_anomaly.is_running:
-                    st_anomaly.stop_processing()
-            else:
-                # ON → start the anomaly pipeline and re-attach to current session
-                pipe_cfg_a = next((p for p in PIPELINES if p["id"] == "pipeline_anomaly"), None)
-                cam_src_a = pipe_cfg_a["camera_source"] if pipe_cfg_a else 2
-                if not st_anomaly.is_running:
-                    st_anomaly.set_enabled_checks(new_checks)
-                    st_anomaly.start_processing(cam_src_a)
-                    gevent.sleep(0.7)
-                    if not st_anomaly.is_running and getattr(st_anomaly, "_camera_error", None):
-                        # Rollback the check change — camera not available
-                        new_checks["anomaly"] = False
-                        for _, st2 in _all_states():
-                            if st2.is_running:
-                                st2.set_enabled_checks(new_checks)
-                        if db_writer:
-                            db_writer.update_session_checks(group_id, new_checks)
-                        return jsonify({
-                            "error": "camera_unavailable",
-                            "message": "Impossible d'activer la détection anomalie. Vérifiez que la caméra est branchée.",
-                        }), 503
-                if not getattr(st_anomaly, "_stats_active", False):
-                    st_anomaly.set_stats_recording(True, group_id=group_id)
+    # Determine which physical pipelines need to be active
+    old_pids = set()
+    if old_checks.get("barcode", True) or old_checks.get("date", True):
+        old_pids.add("pipeline_barcode_date")
+    if old_checks.get("anomaly", True):
+        old_pids.add("pipeline_anomaly")
+        
+    new_pids = set()
+    if new_checks.get("barcode", True) or new_checks.get("date", True):
+        new_pids.add("pipeline_barcode_date")
+    if new_checks.get("anomaly", True):
+        new_pids.add("pipeline_anomaly")
+
+    # Start/stop pipelines based on check changes
+    camera_errors = {}
+    for pipe_cfg in PIPELINES:
+        pid = pipe_cfg["id"]
+        st = pipelines.get(pid)
+        if st is None:
+            continue
+            
+        was_on = pid in old_pids
+        now_on = pid in new_pids
+        
+        if was_on and not now_on:
+            # OFF → fully stop the pipeline
+            if getattr(st, "_stats_active", False):
+                st.set_stats_recording(False, end_reason="check_disabled")
+            if st.is_running:
+                st.stop_processing()
+                
+        elif not was_on and now_on:
+            # ON → start the pipeline and re-attach to current session
+            if not st.is_running:
+                st.set_enabled_checks(new_checks)
+                # Reuse the last known source, or fallback to config
+                src = getattr(st, "video_source", None)
+                if src is None:
+                    src = pipe_cfg.get("camera_source", 0)
+                if isinstance(src, str) and src.isdigit():
+                    src = int(src)
+                st.start_processing(src)
+
+    # Wait briefly for reader threads to attempt camera open
+    gevent.sleep(0.7)
+    
+    for pipe_cfg in PIPELINES:
+        pid = pipe_cfg["id"]
+        st = pipelines.get(pid)
+        if st is None:
+            continue
+        now_on = pid in new_pids
+        if pid not in old_pids and now_on:
+            if not st.is_running and getattr(st, "_camera_error", None):
+                camera_errors[pid] = st._camera_error
+                # Rollback specific flags
+                if pid == "pipeline_anomaly":
+                    new_checks["anomaly"] = False
+                elif pid == "pipeline_barcode_date":
+                    new_checks["barcode"] = False
+                    new_checks["date"] = False
+
+    if camera_errors:
+        # Rollback the check changes in remaining running pipelines
+        for _, st2 in _all_states():
+            if st2.is_running:
+                st2.set_enabled_checks(new_checks)
+        if db_writer:
+            db_writer.update_session_checks(group_id, new_checks)
+        return jsonify({
+            "error": "camera_unavailable",
+            "message": "Impossible d'activer le mode. Vérifiez que la caméra est branchée.",
+            "pipelines": camera_errors
+        }), 503
+
+    # Ensure all newly running pipelines have stats recording ON
+    shift_id_active = pipeline_manager._active_session_shift_id
+    for pid in new_pids:
+        st = pipelines.get(pid)
+        if st and st.is_running and not getattr(st, "_stats_active", False):
+            # Pass is_group=True strictly if it's the anomaly pipeline to stay consistent with original logic,
+            # though it mainly checks if it's not the primary one controlling full IDs
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id_active, is_group=(pid == "pipeline_anomaly"), enabled_checks=new_checks)
 
     # Persist: update the live session rows + insert audit log
     if db_writer:

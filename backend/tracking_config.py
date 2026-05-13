@@ -2,9 +2,9 @@ CHECKPOINTS = [
     {
         "id":            "barcode_date",
         "label":         "Tracking Paquet+Barcode+Date",
-        "path":          "yolo26m_BB_barcode_date.engine",
-        "task": "detect" # required for TensorRT
-        "mode":          "tracking",
+        "path":          "gmcb_l640.pt",
+        "task": "detect",  # required for TensorRT
+        "mode": "tracking",
         "package_class": "package",
         "barcode_class": "barcode",
         "date_class":    "date",
@@ -16,26 +16,26 @@ CHECKPOINTS = [
         # Secondary model for maximum date-detection accuracy.
         # Runs in parallel on each frame; its date detections are used
         # for OK/NOK validation alongside barcodes from the primary model.
-        "secondary_date_model_path": "yolo26m_BB_date.engine",
+        "secondary_date_model_path": "yolo26m_BB_date.pt",
         "secondary_date_class":      "date",
     },
     {
         "id":            "anomaly",
         "label":         "Segmentation + Anomaly Detection",
-        "path":          "yolo26m_seg_farine_FV_v3.engine",
-        "task": "segment" # refers to YOLO segmentation part since task is required for TensorRT            
-        "mode":          "anomaly",
+        "path":          "yolo26m_seg_farine_FV_v3.pt",
+        "task": "segment", # refers to YOLO segmentation part since task is required for TensorRT            
+        "mode": "anomaly",
         "package_class": "farine",
         "barcode_class": None,
         # YOLO overrides for segmentation quality
         "yolo_imgsz":    960,
         "yolo_conf":     0.5,
         # EfficientAD model paths
-        "ad_teacher":    "teacher_best.pth",
-        "ad_student":    "student_best.pth",
-        "ad_autoencoder": "autoencoder_best.pth",
+        "ad_teacher":    "teacher_best_v1.pth",
+        "ad_student":    "student_best_v1.pth",
+        "ad_autoencoder": "autoencoder_best_v1.pth",
         # Anomaly detection parameters
-        "ad_thresh":     5000.0,
+        "ad_thresh":     6000.0,
         "ad_imgsz":      256,
         "ad_strategy":   "MAJORITY",
         "ad_margin_pct": 0.1,
@@ -108,6 +108,28 @@ CONFIG = {
     "date_match_inside_min": 0.60,
     "exit_line_ratio": 0.15,
     "exit_line_proximity": 50,
+    # ── Package-gated filtering ──
+    # When True, drop barcode/date detections that do not sit inside any
+    # tracked package box. Kills conveyor-line false positives (numbers
+    # printed on the belt, etc.). Same match rule as per-track association.
+    "package_gated_filter": True,
+    # ── Crop fallback (digital zoom) ──
+    # When a tracked package has progressed past `crop_fallback_trigger_pct`
+    # through the field and is still missing barcode/date, run a second
+    # YOLO pass on the native-resolution package crop (+ margin). The 5090
+    # makes this essentially free, and it recovers details lost by the
+    "crop_fallback_enabled": True,
+    "crop_fallback_trigger_pct": 50,
+    "crop_fallback_margin_pct": 0.30,
+    "crop_fallback_imgsz": 640,
+    "crop_fallback_conf_barcode": 0.30,
+    "crop_fallback_conf_date": 0.30,
+    # Safety caps: budget per frame, and per-package attempt cap.
+    # After N unsuccessful attempts on a given package we stop — if the
+    # symbol hasn't surfaced by then it genuinely isn't there.
+    "crop_fallback_max_per_frame": 2,
+    "crop_fallback_max_per_package": 5,
+    "crop_fallback_min_size": 32,
 }
 
 # ==========================

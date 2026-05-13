@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
@@ -22,10 +21,12 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     --network=host \
     pip install \
-    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    --extra-index-url https://download.pytorch.org/whl/cu132 \
     -r requirements.txt
 
 COPY . .
+# Remove any pre-compiled python bytecode to prevent "bad marshal data" issues
+RUN find /usr/local/lib/python3.11/site-packages -name "*.pyc" -delete
 
 EXPOSE 5000
 
