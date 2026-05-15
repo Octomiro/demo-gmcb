@@ -65,6 +65,7 @@ class DBWriter:
             # Verify and close zombie sessions left from a previous crash
             conn = self._pg_pool.getconn()
             try:
+                self._ensure_schema_migrations_pg(conn)
                 self.close_zombie_sessions_pg(conn)
             finally:
                 self._pg_pool.putconn(conn)
@@ -73,6 +74,21 @@ class DBWriter:
         except Exception as e:
             print(f"[DBWriter] FATAL: PostgreSQL unreachable — {e}")
             return False
+
+    def _ensure_schema_migrations_pg(self, conn):
+        """Apply lightweight migrations needed by the running backend."""
+        try:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS confirmed INTEGER DEFAULT 0")
+                cur.execute(
+                    "UPDATE sessions "
+                    "SET confirmed = CASE WHEN end_reason = 'camera_unavailable' THEN 0 ELSE 1 END "
+                    "WHERE confirmed IS NULL OR confirmed = 0"
+                )
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            print(f"[DBWriter] schema migration error: {e}")
 
     def close_zombie_sessions_pg(self, conn):
         """Mark sessions that were never closed (server crash / kill) as interrupted."""
@@ -126,7 +142,7 @@ class DBWriter:
     def backend(self):
         return "postgres"
 
-    def open_session(self, checkpoint_id="", camera_source="", group_id="", shift_id="", enabled_checks=None):
+    def open_session(self, checkpoint_id="", camera_source="", group_id="", shift_id="", enabled_checks=None, confirmed=True):
         sid = str(uuid.uuid4())
         with self._lock:
             self._current_session_id = sid
@@ -136,9 +152,9 @@ class DBWriter:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "INSERT INTO sessions (id, group_id, shift_id, started_at, checkpoint_id, camera_source, enabled_checks) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (sid, group_id, shift_id, _ts(), checkpoint_id, camera_source, checks_json),
+                        "INSERT INTO sessions (id, group_id, shift_id, started_at, checkpoint_id, camera_source, enabled_checks, confirmed) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        (sid, group_id, shift_id, _ts(), checkpoint_id, camera_source, checks_json, 1 if confirmed else 0),
                     )
                 conn.commit()
             except Exception as e:
@@ -268,12 +284,15 @@ class DBWriter:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 query = (
                     "SELECT id, group_id, shift_id, started_at, ended_at, end_reason, checkpoint_id, camera_source, "
-                    "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly, enabled_checks "
+                    "total, ok_count, nok_no_barcode, nok_no_date, nok_anomaly, enabled_checks, confirmed "
                     "FROM sessions "
                 )
                 query_params = list(params)
+                filters = ["COALESCE(confirmed, 0) = 1"]
                 if where_sql:
-                    query += f"WHERE {where_sql} "
+                    filters.append(f"({where_sql})")
+                if filters:
+                    query += "WHERE " + " AND ".join(filters) + " "
                 query += "ORDER BY started_at DESC"
                 if limit is not None:
                     query += " LIMIT %s"
@@ -389,6 +408,14 @@ class DBWriter:
                 if new_p > cur_p:
                     g["end_reason"] = r.get("end_reason")
         grouped = list(groups.values())
+        for g in grouped:
+            try:
+                changes = self.get_check_changes_for_group(g["id"])
+                if changes:
+                    raw_initial = changes[0].get("old_checks")
+                    g["enabled_checks"] = json.loads(raw_initial) if isinstance(raw_initial, str) else raw_initial
+            except Exception:
+                pass
         return grouped[:limit] if limit is not None else grouped
 
     def list_grouped_sessions(self, limit=50):

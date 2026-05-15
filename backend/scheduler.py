@@ -162,10 +162,12 @@ def _shift_start(shift_id):
                     }
 
                 print(f"[SCHEDULER] Manual session stopped & marked as interrupted")
+
             # Clear guard in both cases
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
 
         elif current_source is not None:
             # Unknown source but no pipelines running → stale guard
@@ -182,6 +184,7 @@ def _shift_start(shift_id):
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
 
         today_str = datetime.now(_TUNIS_TZ).strftime("%Y-%m-%d")
         should_run, _time_ov = _check_shift_variants(shift_id, today_str)
@@ -195,6 +198,7 @@ def _shift_start(shift_id):
         pipeline_manager._active_session_source = "shift"
         pipeline_manager._active_session_group = group_id
         pipeline_manager._active_session_shift_id = shift_id
+        pipeline_manager._active_session_confirmed = False
 
     # Determine which pipelines this shift enables
     _ep_raw = shift.get("enabled_pipelines")
@@ -252,11 +256,6 @@ def _shift_start(shift_id):
             st.start_processing(cam_src)
             print(f"[SCHEDULER][{pid}] Started on camera {cam_src}")
 
-        if not getattr(st, '_stats_active', False):
-            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
-                                   enabled_checks=enabled_checks)
-            print(f"[SCHEDULER][{pid}] Stats recording started (group {group_id[:8]}…)")
-
     # Wait for reader threads to attempt camera open, then detect failures.
     time.sleep(0.8)
     failed_pids = []
@@ -267,12 +266,19 @@ def _shift_start(shift_id):
             continue
         if not st.is_running and getattr(st, "_camera_error", None) == "camera_unavailable":
             failed_pids.append(pid)
-            print(f"[SCHEDULER][{pid}] Camera unavailable — recording failure in DB")
-            # The session was opened by set_stats_recording; close it as failed.
-            if getattr(st, "_stats_active", False):
-                st.set_stats_recording(False, end_reason="camera_unavailable")
+            print(f"[SCHEDULER][{pid}] Camera unavailable — shift start not confirmed")
 
     if failed_pids:
+        for pid, st in _all_states():
+            if getattr(st, "_stats_active", False):
+                st.set_stats_recording(False, end_reason="camera_unavailable")
+            if st.is_running:
+                st.stop_processing()
+        with _session_lock:
+            pipeline_manager._active_session_source = None
+            pipeline_manager._active_session_group = None
+            pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
         global _camera_failure_event
         with _camera_failure_lock:
             _camera_failure_event = {
@@ -281,6 +287,30 @@ def _shift_start(shift_id):
                 "pipelines": failed_pids,
             }
         print(f"[SCHEDULER] Shift '{label}' — camera failure on pipelines: {failed_pids}")
+        return
+
+    for pid in enabled_pids:
+        st = pipelines.get(pid)
+        if st and st.is_running and not getattr(st, '_stats_active', False):
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
+                                   enabled_checks=enabled_checks)
+            print(f"[SCHEDULER][{pid}] Stats recording started (group {group_id[:8]}…)")
+
+    confirmed = any(
+        bool(getattr(pipelines.get(pid), "_stats_active", False))
+        for pid in enabled_pids
+    )
+    with _session_lock:
+        if pipeline_manager._active_session_group == group_id:
+            pipeline_manager._active_session_confirmed = confirmed
+            if not confirmed:
+                pipeline_manager._active_session_source = None
+                pipeline_manager._active_session_group = None
+                pipeline_manager._active_session_shift_id = None
+
+    if not confirmed:
+        print(f"[SCHEDULER] Shift '{label}' did not start — no active pipelines confirmed")
+        return
 
     print(f"[SCHEDULER] Shift '{label}' started automatically — pipelines active: {sorted(enabled_pids)} — checks: {enabled_checks}")
 
@@ -301,6 +331,7 @@ def _shift_stop(shift_id):
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
             return
 
     print(f"[SCHEDULER] Shift '{label}' stopping — deactivating all pipelines")
@@ -317,6 +348,7 @@ def _shift_stop(shift_id):
         pipeline_manager._active_session_source = None
         pipeline_manager._active_session_group = None
         pipeline_manager._active_session_shift_id = None
+        pipeline_manager._active_session_confirmed = False
 
     print(f"[SCHEDULER] Shift '{label}' stopped automatically — all pipelines inactive")
 

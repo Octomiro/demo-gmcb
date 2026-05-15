@@ -32,6 +32,46 @@ function formatDurationMinutes(minutes: number): string {
   return `${minutes} min`;
 }
 
+type ModeCheckKey = "barcode" | "date" | "anomaly";
+type ModeCheckState = Record<ModeCheckKey, boolean>;
+type ModeChange = { changed_at: string; old_checks?: unknown; new_checks?: unknown };
+type SessionCrossing = { session_id?: string; packet_num?: number; defect_type?: string; crossed_at?: string };
+
+const DEFAULT_MODE_CHECKS: ModeCheckState = { barcode: true, date: true, anomaly: true };
+
+function coerceModeChecks(raw: unknown, fallback: ModeCheckState = DEFAULT_MODE_CHECKS): ModeCheckState {
+  let parsed = raw;
+  if (typeof raw === "string") {
+    try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  }
+  const obj = parsed && typeof parsed === "object" ? parsed as Partial<Record<ModeCheckKey, unknown>> : {};
+  return {
+    barcode: typeof obj.barcode === "boolean" ? obj.barcode : fallback.barcode,
+    date: typeof obj.date === "boolean" ? obj.date : fallback.date,
+    anomaly: typeof obj.anomaly === "boolean" ? obj.anomaly : fallback.anomaly,
+  };
+}
+
+function inferSessionChecks(session: Pick<Session, "enabled_checks" | "checkpoint_id" | "checkpoint_ids">): ModeCheckState {
+  const checkpointIds = (session.checkpoint_ids ?? [session.checkpoint_id]).map((c) => String(c ?? ""));
+  const inferred: ModeCheckState = {
+    barcode: checkpointIds.some((c) => c.includes("barcode") || c.includes("tracking")),
+    date: checkpointIds.some((c) => c.includes("barcode") || c.includes("tracking")),
+    anomaly: checkpointIds.some((c) => c.includes("anomaly")),
+  };
+  return coerceModeChecks(session.enabled_checks, inferred);
+}
+
+function sortedModeChanges(changes: ModeChange[]): ModeChange[] {
+  return [...(changes ?? [])].sort((a, b) => new Date(a.changed_at).getTime() - new Date(b.changed_at).getTime());
+}
+
+function getInitialSessionChecks(session: Pick<Session, "enabled_checks" | "checkpoint_id" | "checkpoint_ids">, changes: ModeChange[]): ModeCheckState {
+  const sessionChecks = inferSessionChecks(session);
+  const firstChange = sortedModeChanges(changes)[0];
+  return firstChange ? coerceModeChecks(firstChange.old_checks, sessionChecks) : sessionChecks;
+}
+
 function buildPlannedDateRange(dateIso: string, start: string, end: string): { start: Date; end: Date } {
   return buildTunisiaDateRange(dateIso, start, end);
 }
@@ -662,11 +702,7 @@ export function HistDayModal({ daySummary, defectLabel, dayModalOrigin, onClose,
                           <span>{startH} – {endH}</span>
                           {(() => { const _sd = getTunisiaIsoDateFromTimestamp(s.started_at); const _ed = getTunisiaIsoDateFromTimestamp(s.ended_at); return (_sd && _ed && _sd !== _ed) ? <span style={{ padding: "1px 6px", borderRadius: 5, background: "#eff6ff", color: "#2563eb", fontSize: 10, fontWeight: 700, border: "1px solid #bfdbfe" }}>+1J</span> : null; })()}
                           {(() => {
-                            const ec = s.enabled_checks ?? {
-                              barcode: (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("barcode")),
-                              date:    (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("barcode")),
-                              anomaly: (s.checkpoint_ids ?? [s.checkpoint_id]).some(c => c?.includes("anomaly")),
-                            };
+                            const ec = inferSessionChecks(s);
                             return ([{ key: "barcode", label: "Barcode" }, { key: "date", label: "Date" }, { key: "anomaly", label: "Anomalie" }] as const).map(({ key, label }) => {
                               const on = ec[key];
                               return (
@@ -999,9 +1035,9 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
   modalAnomaly: AnomalyItem | null; exportModal: AnomalyItem[] | null;
   openFeedbackModal: (preset?: Record<string, string>) => void;
 }) {
-  const [crossings, setCrossings] = useState<any[]>([]);
+  const [crossings, setCrossings] = useState<SessionCrossing[]>([]);
   const [crossLoading, setCrossLoading] = useState(true);
-  const [checkChanges, setCheckChanges] = useState<any[]>([]);
+  const [checkChanges, setCheckChanges] = useState<ModeChange[]>([]);
   const [anomPage, setAnomalPage] = useState(0);
   const [activeFilter, setActiveFilter] = useState("Tous");
   const [galleryExpanded, setGalleryExpanded] = useState(false);
@@ -1017,7 +1053,7 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
 
   useEffect(() => {
     let cancelled = false;
-    backendApi.getCrossings(session.id, 5000).then((r: any) => {
+    backendApi.getCrossings(session.id, 5000).then((r: { crossings?: SessionCrossing[] }) => {
       if (!cancelled) setCrossings(r?.crossings ?? []);
     }).catch(() => {}).finally(() => { if (!cancelled) setCrossLoading(false); });
     return () => { cancelled = true; };
@@ -1025,22 +1061,24 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
 
   useEffect(() => {
     let cancelled = false;
-    backendApi.getCheckChanges(session.id).then((r: any) => {
+    backendApi.getCheckChanges(session.id).then((r: { changes?: ModeChange[] }) => {
       if (!cancelled) setCheckChanges(r?.changes ?? []);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [session.id]);
 
-  const anomalyItems: AnomalyItem[] = [...crossings].reverse().map((c: any, i: number) => ({
+  const anomalyItems: AnomalyItem[] = [...crossings].reverse().map((c, i: number) => ({
     id: c.packet_num ?? i + 1,
-    type: defectLabel(c.defect_type),
+    type: defectLabel(c.defect_type ?? ""),
     time: formatTunisiaTime(c.crossed_at, true),
     lot: `#${c.packet_num ?? "?"}`,
     score: 0,
-    category: galleryCategoryFromDefectType(c.defect_type),
-    img: backendApi.proofImageUrl(c.session_id ?? session.id, c.defect_type, c.packet_num ?? 0),
-    fallbackImg: proofFallbackForDefectType(c.defect_type),
+    category: galleryCategoryFromDefectType(c.defect_type ?? ""),
+    img: backendApi.proofImageUrl(c.session_id ?? session.id, c.defect_type ?? "", c.packet_num ?? 0),
+    fallbackImg: proofFallbackForDefectType(c.defect_type ?? ""),
   }));
+  const orderedCheckChanges = sortedModeChanges(checkChanges);
+  const initialSessionChecks = getInitialSessionChecks(session, orderedCheckChanges);
 
   const filtered = activeFilter === "Tous" ? anomalyItems
     : anomalyItems.filter((a) => a.category === activeFilter);
@@ -1079,11 +1117,7 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
             <p style={{ margin: 0, fontSize: 13, color: "#777", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 5 }}>
               <span>{startH} – {endH}</span>
               {(() => {
-                const ec = session.enabled_checks ?? {
-                  barcode: (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("barcode")),
-                  date:    (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("barcode")),
-                  anomaly: (session.checkpoint_ids ?? [session.checkpoint_id]).some(c => c?.includes("anomaly")),
-                };
+                const ec = initialSessionChecks;
                 return ([{ key: "barcode", label: "Barcode" }, { key: "date", label: "Date" }, { key: "anomaly", label: "Anomalie" }] as const).map(({ key, label }) => {
                   const on = ec[key];
                   return (
@@ -1108,127 +1142,6 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
         <StatCard icon={<Camera size={24} color="#2563eb" />} iconBg="#dbeafe" value={pct + "%"} label="Taux de conformité" />
         <StatCard icon={<Timer size={24} color="#9333ea" />} iconBg="#f3e8ff" value="75/min" label="Cadence analyse" />
       </div>
-
-      {/* Duration & Mode Stats — moved to bottom, see below */}
-      {null && (() => {
-        const startMs = session.started_at ? new Date(session.started_at).getTime() : null;
-        const endMs   = session.ended_at   ? new Date(session.ended_at).getTime()   : null;
-        if (!startMs || !endMs) return null;
-        const totalMs = endMs - startMs;
-        const totalMin = totalMs / 60000;
-
-        const fmtDuration = (ms: number) => {
-          const totalSec = Math.round(ms / 1000);
-          const h = Math.floor(totalSec / 3600);
-          const m = Math.floor((totalSec % 3600) / 60);
-          const s = totalSec % 60;
-          if (h > 0) return `${h}h ${m.toString().padStart(2, "0")}min`;
-          if (m > 0) return `${m}min ${s.toString().padStart(2, "0")}s`;
-          return `${s}s`;
-        };
-
-        // Build per-mode active-time using check-change events
-        type CheckKey = "barcode" | "date" | "anomaly";
-        const MODES: { key: CheckKey; label: string; color: string; bg: string; border: string }[] = [
-          { key: "barcode", label: "Code à barre", color: "#0369a1", bg: "#eff6ff", border: "#bfdbfe" },
-          { key: "date",    label: "Date",          color: "#047857", bg: "#ecfdf5", border: "#a7f3d0" },
-          { key: "anomaly", label: "Anomalie",      color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
-        ];
-
-        const initialChecks: Record<CheckKey, boolean> = {
-          barcode: session.enabled_checks?.barcode ?? true,
-          date:    session.enabled_checks?.date    ?? true,
-          anomaly: session.enabled_checks?.anomaly ?? true,
-        };
-
-        // Build timeline: [{ts, checks}] sorted by time
-        type Snap = { ts: number; checks: Record<CheckKey, boolean> };
-        const snapshots: Snap[] = [{ ts: startMs, checks: { ...initialChecks } }];
-        for (const c of checkChanges) {
-          let nc: Record<CheckKey, boolean> = { barcode: true, date: true, anomaly: true };
-          try { nc = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
-          snapshots.push({ ts: new Date(c.changed_at).getTime(), checks: { ...nc } });
-        }
-        snapshots.sort((a, b) => a.ts - b.ts);
-        snapshots.push({ ts: endMs, checks: snapshots[snapshots.length - 1].checks });
-
-        const activeMsPerMode: Record<CheckKey, number> = { barcode: 0, date: 0, anomaly: 0 };
-        for (let i = 0; i < snapshots.length - 1; i++) {
-          const seg = snapshots[i + 1].ts - snapshots[i].ts;
-          for (const key of ["barcode", "date", "anomaly"] as CheckKey[]) {
-            if (snapshots[i].checks[key]) activeMsPerMode[key] += seg;
-          }
-        }
-
-        const durationLabel = fmtDuration(totalMs);
-        const hStart = formatTunisiaTime(session.started_at, true);
-        const hEnd   = formatTunisiaTime(session.ended_at,   true);
-
-        return (
-          <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8eaed", padding: 20, marginBottom: 24 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
-              <Timer size={17} color="#6366f1" />
-              <span style={{ fontWeight: 700, fontSize: 15 }}>Durée &amp; Modes</span>
-            </div>
-
-            {/* Duration bar */}
-            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 20, padding: "12px 16px", borderRadius: 10, background: "#f8fafc", border: "1px solid #e2e8f0" }}>
-              <div style={{ width: 40, height: 40, borderRadius: 10, background: "#ede9fe", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <Timer size={20} color="#7c3aed" />
-              </div>
-              <div>
-                <div style={{ fontSize: 22, fontWeight: 800, color: "#111", lineHeight: 1 }}>{durationLabel}</div>
-                <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>{hStart} → {hEnd}</div>
-              </div>
-              <div style={{ marginLeft: "auto", fontSize: 12, color: "#64748b", textAlign: "right" }}>
-                <div style={{ fontWeight: 600 }}>{Math.round(totalMin)} minutes</div>
-                <div>{session.total ?? 0} paquets analysés</div>
-              </div>
-            </div>
-
-            {/* Per-mode bars */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {MODES.map(({ key, label, color, bg, border }) => {
-                const activeMs  = activeMsPerMode[key];
-                const inactiveMs = totalMs - activeMs;
-                const activePct  = totalMs > 0 ? Math.round((activeMs / totalMs) * 100) : 0;
-                const inactivePct = 100 - activePct;
-                const activeLabel = fmtDuration(activeMs);
-                const inactiveLabel = inactiveMs > 0 ? fmtDuration(inactiveMs) : null;
-                return (
-                  <div key={key}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ padding: "2px 10px", borderRadius: 999, background: bg, color, border: `1px solid ${border}`, fontSize: 12, fontWeight: 700 }}>{label}</span>
-                        {inactiveMs > 0 && (
-                          <span style={{ fontSize: 11, color: "#888" }}>désactivé {fmtDuration(inactiveMs)}</span>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 12, fontWeight: 700, color }}>
-                        {activeLabel} <span style={{ fontWeight: 400, color: "#999" }}>({activePct}%)</span>
-                      </div>
-                    </div>
-                    <div style={{ height: 8, borderRadius: 99, background: "#f1f5f9", overflow: "hidden" }}>
-                      <div style={{ display: "flex", height: "100%" }}>
-                        {activePct > 0 && (
-                          <div style={{ width: `${activePct}%`, background: color, borderRadius: inactivePct > 0 ? "99px 0 0 99px" : 99, transition: "width .4s" }} />
-                        )}
-                        {inactivePct > 0 && (
-                          <div style={{ width: `${inactivePct}%`, background: "#fecaca", borderRadius: activePct > 0 ? "0 99px 99px 0" : 99 }} />
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3, fontSize: 10, color: "#aaa" }}>
-                      <span style={{ color }}>Actif {activePct}%</span>
-                      {inactivePct > 0 && <span style={{ color: "#ef4444" }}>Inactif {inactivePct}%</span>}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })()}
 
       {/* Anomalies */}
       <div style={{ background: "#fff", borderRadius: 12, border: "1px solid #e8eaed", padding: 20, marginBottom: 24 }}>
@@ -1303,16 +1216,11 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
           { key: "date",    label: "Date",          color: "#047857", bg: "#ecfdf5", border: "#a7f3d0" },
           { key: "anomaly", label: "Anomalie",      color: "#7c3aed", bg: "#f5f3ff", border: "#ddd6fe" },
         ];
-        const initialChecks: Record<CheckKey, boolean> = {
-          barcode: session.enabled_checks?.barcode ?? true,
-          date:    session.enabled_checks?.date    ?? true,
-          anomaly: session.enabled_checks?.anomaly ?? true,
-        };
+        const initialChecks: Record<CheckKey, boolean> = { ...initialSessionChecks };
         type Snap = { ts: number; checks: Record<CheckKey, boolean> };
         const snapshots: Snap[] = [{ ts: startMs, checks: { ...initialChecks } }];
-        for (const c of checkChanges) {
-          let nc: Record<CheckKey, boolean> = { barcode: true, date: true, anomaly: true };
-          try { nc = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+        for (const c of orderedCheckChanges) {
+          const nc = coerceModeChecks(c.new_checks, snapshots[snapshots.length - 1].checks) as Record<CheckKey, boolean>;
           snapshots.push({ ts: new Date(c.changed_at).getTime(), checks: { ...nc } });
         }
         snapshots.sort((a, b) => a.ts - b.ts);
@@ -1336,9 +1244,8 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
         const offPeriods: Record<string, Period[]> = { barcode: [], date: [], anomaly: [] };
         const events = [
           { ts: session.started_at, checks: initialChecks as CheckState },
-          ...checkChanges.map((c: any) => {
-            let parsed: CheckState = { barcode: true, date: true, anomaly: true };
-            try { parsed = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+          ...orderedCheckChanges.map((c) => {
+            const parsed = coerceModeChecks(c.new_checks, initialChecks) as CheckState;
             return { ts: c.changed_at, checks: parsed };
           }),
         ];
@@ -1354,11 +1261,9 @@ function HistSessionDetailView({ session, daySummary, defectLabel, onBack, setMo
         const timelineEntries = [
           { ts: session.started_at, label: "Démarrage session", icon: "▶", color: "#15803d", bg: "#dcfce7", border: "#bbf7d0",
             sub: MODE_INFO.filter(m => initialChecks[m.key]).map(m => m.label).join(", ") || "aucun mode" },
-          ...checkChanges.map((c: any) => {
-            let oldC: CheckState = { barcode: true, date: true, anomaly: true };
-            let newC: CheckState = { barcode: true, date: true, anomaly: true };
-            try { oldC = typeof c.old_checks === "string" ? JSON.parse(c.old_checks) : c.old_checks; } catch { /**/ }
-            try { newC = typeof c.new_checks === "string" ? JSON.parse(c.new_checks) : c.new_checks; } catch { /**/ }
+          ...orderedCheckChanges.map((c) => {
+            const oldC = coerceModeChecks(c.old_checks, initialChecks) as CheckState;
+            const newC = coerceModeChecks(c.new_checks, oldC) as CheckState;
             const changes: string[] = [];
             for (const m of MODE_INFO) { if (oldC[m.key] !== newC[m.key]) changes.push(`${m.label} ${newC[m.key] ? "activé" : "désactivé"}`); }
             const isOff = changes.some(ch => ch.includes("désactivé"));
