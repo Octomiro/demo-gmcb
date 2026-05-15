@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     nok_no_date     INTEGER DEFAULT 0,
     nok_anomaly     INTEGER DEFAULT 0,
     enabled_checks  TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}',
+    confirmed       INTEGER DEFAULT 0,
     end_reason      TEXT DEFAULT NULL   -- NULL=normal stop, 'preempted', 'interrupted'
 );
 
@@ -19,6 +20,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS enabled_checks TEXT DEFAULT '{"barcode":true,"date":true,"anomaly":true}';
 -- Migration: add end_reason to sessions if it doesn't exist yet
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS end_reason TEXT DEFAULT NULL;
+-- Migration: only confirmed sessions are included in stats/history.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS confirmed INTEGER DEFAULT 0;
+UPDATE sessions
+SET confirmed = CASE WHEN end_reason = 'camera_unavailable' THEN 0 ELSE 1 END
+WHERE confirmed IS NULL OR confirmed = 0;
 
 CREATE TABLE IF NOT EXISTS defective_packets (
     id              SERIAL PRIMARY KEY,
@@ -111,4 +117,3 @@ CREATE TABLE IF NOT EXISTS feedbacks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_feedbacks_created ON feedbacks (created_at DESC);
-

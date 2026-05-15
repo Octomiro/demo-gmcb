@@ -436,16 +436,19 @@ def api_stats_toggle():
     any_active = any(getattr(st, '_stats_active', False) for _, st in _all_states())
     new_active = not any_active
     group_id = str(uuid.uuid4()) if new_active else ""
+    stats_active_response = new_active
 
     with _session_lock:
         if new_active:
             pipeline_manager._active_session_source = "manual"
             pipeline_manager._active_session_group = group_id
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
         else:
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
 
     results = {}
     for pid, st in _all_states():
@@ -454,8 +457,19 @@ def api_stats_toggle():
             results[pid] = {"stats_active": False, "session_id": None}
             continue
         results[pid] = st.set_stats_recording(new_active, group_id=group_id)
+    if new_active:
+        confirmed = any(bool(r.get("stats_active")) for r in results.values() if isinstance(r, dict))
+        stats_active_response = confirmed
+        with _session_lock:
+            if confirmed:
+                pipeline_manager._active_session_confirmed = True
+            else:
+                pipeline_manager._active_session_source = None
+                pipeline_manager._active_session_group = None
+                pipeline_manager._active_session_shift_id = None
+                pipeline_manager._active_session_confirmed = False
     return jsonify({
-        "stats_active": new_active,
+        "stats_active": stats_active_response,
         "group_id": group_id,
         "db_available": db_writer is not None,
         "db_backend": db_writer.backend if db_writer is not None else None,
@@ -483,6 +497,7 @@ def api_session_start():
         pipeline_manager._active_session_source = "manual"
         pipeline_manager._active_session_group = group_id
         pipeline_manager._active_session_shift_id = shift_id or None
+        pipeline_manager._active_session_confirmed = False
 
     # Parse enabled_checks from request (default: all enabled)
     raw_checks = data.get("enabled_checks") or {}
@@ -501,6 +516,7 @@ def api_session_start():
 
     source_overrides = data.get("sources", {})
     pipeline_results = {}
+    active_pids = set()
     for pipe_cfg in PIPELINES:
         pid = pipe_cfg["id"]
         st = pipelines.get(pid)
@@ -517,9 +533,10 @@ def api_session_start():
         st.set_enabled_checks(enabled_checks)
         if not st.is_running:
             st.start_processing(source)
-        st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
-                               enabled_checks=enabled_checks)
-        pipeline_results[pid] = "started"
+            pipeline_results[pid] = "started"
+        else:
+            pipeline_results[pid] = "already_running"
+        active_pids.add(pid)
 
     # Brief wait for reader threads — detect camera failures before returning.
     gevent.sleep(0.7)
@@ -532,22 +549,46 @@ def api_session_start():
         if not st.is_running and getattr(st, "_camera_error", None):
             camera_errors[pid] = st._camera_error
     if camera_errors:
-        # Roll back: close the session records and clear the guard so the
-        # scheduler (and next manual attempt) can try again cleanly.
+        # Roll back before creating any DB sessions so failed starts do not
+        # pollute stats/history.
         for pid, st in _all_states():
-            if getattr(st, "_stats_active", False):
-                st.set_stats_recording(False, end_reason="camera_unavailable")
             if st.is_running:
                 st.stop_processing()
         with _session_lock:
             pipeline_manager._active_session_source = None
             pipeline_manager._active_session_group = None
             pipeline_manager._active_session_shift_id = None
+            pipeline_manager._active_session_confirmed = False
         return jsonify({
             "error": "camera_unavailable",
             "message": "Impossible d'ouvrir la caméra. Vérifiez qu'elle est branchée et réessayez.",
             "pipelines": camera_errors,
         }), 503
+
+    for pid in active_pids:
+        st = pipelines.get(pid)
+        if st and st.is_running and not getattr(st, "_stats_active", False):
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id,
+                                   enabled_checks=enabled_checks)
+
+    confirmed = any(
+        bool(getattr(pipelines.get(pid), "_stats_active", False))
+        for pid in active_pids
+    )
+    with _session_lock:
+        if pipeline_manager._active_session_group == group_id:
+            pipeline_manager._active_session_confirmed = confirmed
+            if not confirmed:
+                pipeline_manager._active_session_source = None
+                pipeline_manager._active_session_group = None
+                pipeline_manager._active_session_shift_id = None
+
+    if not confirmed:
+        return jsonify({
+            "error": "session_not_started",
+            "message": "Aucun mode actif n'a pu démarrer la session.",
+            "pipelines": pipeline_results,
+        }), 409
 
     return jsonify({
         "status": "started",
@@ -573,6 +614,7 @@ def api_session_stop():
         pipeline_manager._active_session_source = None
         pipeline_manager._active_session_group = None
         pipeline_manager._active_session_shift_id = None
+        pipeline_manager._active_session_confirmed = False
 
     return jsonify({
         "status": "stopped",
@@ -616,6 +658,7 @@ def api_session_status():
         "source": pipeline_manager._active_session_source,
         "group_id": pipeline_manager._active_session_group,
         "shift_id": pipeline_manager._active_session_shift_id,
+        "confirmed": bool(getattr(pipeline_manager, "_active_session_confirmed", False)),
         "any_running": any_running,
         "any_recording": any_recording,
         "guard_stale": guard_stale,
@@ -632,6 +675,7 @@ def api_session_reset_guard():
         pipeline_manager._active_session_source = None
         pipeline_manager._active_session_group = None
         pipeline_manager._active_session_shift_id = None
+        pipeline_manager._active_session_confirmed = False
     print(f"[SESSION] Guard manually reset (was: {prev})")
     return jsonify({"reset": True, "previous_source": prev})
 
@@ -732,8 +776,6 @@ def api_session_update_checks():
         for _, st2 in _all_states():
             if st2.is_running:
                 st2.set_enabled_checks(new_checks)
-        if db_writer:
-            db_writer.update_session_checks(group_id, new_checks)
         return jsonify({
             "error": "camera_unavailable",
             "message": "Impossible d'activer le mode. Vérifiez que la caméra est branchée.",
@@ -745,13 +787,11 @@ def api_session_update_checks():
     for pid in new_pids:
         st = pipelines.get(pid)
         if st and st.is_running and not getattr(st, "_stats_active", False):
-            # Pass is_group=True strictly if it's the anomaly pipeline to stay consistent with original logic,
-            # though it mainly checks if it's not the primary one controlling full IDs
-            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id_active, is_group=(pid == "pipeline_anomaly"), enabled_checks=new_checks)
+            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id_active,
+                                   enabled_checks=new_checks)
 
     # Persist: update the live session rows + insert audit log
     if db_writer:
-        db_writer.update_session_checks(group_id, new_checks)
         db_writer.log_check_change(group_id, old_checks, new_checks)
 
     print(f"[SESSION] Live checks updated: {old_checks} → {new_checks}")
@@ -780,6 +820,7 @@ def _auto_stop_session():
         pipeline_manager._active_session_source = None
         pipeline_manager._active_session_group = None
         pipeline_manager._active_session_shift_id = None
+        pipeline_manager._active_session_confirmed = False
     _scheduled_stop_time = None
 
 
@@ -2095,6 +2136,7 @@ def _shutdown():
     pipeline_manager._active_session_source = None
     pipeline_manager._active_session_group = None
     pipeline_manager._active_session_shift_id = None
+    pipeline_manager._active_session_confirmed = False
     try:
         if db_writer:
             db_writer.stop()

@@ -149,6 +149,64 @@ def _normalize_enabled_checks(session: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def _normalize_check_payload(raw: Any, fallback: dict[str, bool]) -> dict[str, bool]:
+    parsed = raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+    if not isinstance(parsed, dict):
+        parsed = {}
+    return {
+        "barcode": bool(parsed["barcode"]) if "barcode" in parsed else fallback["barcode"],
+        "date": bool(parsed["date"]) if "date" in parsed else fallback["date"],
+        "anomaly": bool(parsed["anomaly"]) if "anomaly" in parsed else fallback["anomaly"],
+    }
+
+
+def _session_mode_seconds(db_writer, session: dict[str, Any], started_dt: datetime, ended_dt: datetime) -> tuple[dict[str, bool], dict[str, float]]:
+    fallback = _normalize_enabled_checks(session)
+    changes = []
+    group_id = session.get("id") or session.get("group_id")
+    if group_id and hasattr(db_writer, "get_check_changes_for_group"):
+        try:
+            changes = db_writer.get_check_changes_for_group(group_id) or []
+        except Exception:
+            changes = []
+
+    changes = sorted(changes, key=lambda row: row.get("changed_at") or "")
+    initial_checks = (
+        _normalize_check_payload(changes[0].get("old_checks"), fallback)
+        if changes
+        else fallback
+    )
+
+    points: list[tuple[datetime, dict[str, bool]]] = [(started_dt, initial_checks)]
+    last_checks = initial_checks
+    for change in changes:
+        changed_dt = _parse_backend_timestamp(change.get("changed_at"))
+        if changed_dt is None or changed_dt < started_dt or changed_dt > ended_dt:
+            continue
+        last_checks = _normalize_check_payload(change.get("new_checks"), last_checks)
+        points.append((changed_dt, last_checks))
+
+    points.sort(key=lambda item: item[0])
+    points.append((ended_dt, points[-1][1]))
+
+    active_seconds = {key: 0.0 for key in _MODE_ORDER}
+    for index in range(len(points) - 1):
+        current_dt, checks = points[index]
+        next_dt = points[index + 1][0]
+        seg_seconds = max(0.0, (next_dt - current_dt).total_seconds())
+        for mode_key in _MODE_ORDER:
+            if checks.get(mode_key):
+                active_seconds[mode_key] += seg_seconds
+
+    active_checks = {key: active_seconds[key] > 0 for key in _MODE_ORDER}
+    return active_checks, active_seconds
+
+
 def _mode_abbrev(checks: dict[str, bool]) -> str:
     """Return compact abbreviation string: CAB / D / A."""
     parts = []
@@ -246,7 +304,7 @@ def build_report_summary(db_writer, start_date: str, end_date: str) -> dict[str,
         if session_day_iso not in daily_map:
             continue
 
-        checks = _normalize_enabled_checks(session)
+        checks, mode_active_seconds = _session_mode_seconds(db_writer, session, started_dt, ended_dt)
         mode_abbrev = _mode_abbrev(checks)
         mode_labels = _mode_labels(checks)
         duration_minutes = max(
@@ -284,7 +342,7 @@ def build_report_summary(db_writer, start_date: str, end_date: str) -> dict[str,
             if checks.get(mode_key):
                 active_modes_seen.add(mode_key)
                 mode_session_counts[mode_key] += 1
-                mode_duration_minutes[mode_key] += duration_minutes
+                mode_duration_minutes[mode_key] += int(round(mode_active_seconds[mode_key] / 60.0))
 
         combo_counts[mode_abbrev] = combo_counts.get(mode_abbrev, 0) + 1
         session_rows.append({

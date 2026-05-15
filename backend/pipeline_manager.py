@@ -28,6 +28,7 @@ pipeline_checkpoint_ids: dict = {}   # pipeline_id → checkpoint_id
 _active_session_source = None    # "shift" | "manual" | None
 _active_session_group = None     # shared group_id
 _active_session_shift_id = None  # owning shift_id if source is "shift"
+_active_session_confirmed = False  # True only after cameras opened and DB stats began
 _session_lock = threading.Lock()
 
 
