@@ -15,7 +15,7 @@ import {
   StatCard, CamFeed, Pager, ExportModal, AnomalyModal,
 } from "./gmcbComponents";
 import { useLiveStats } from "@/hooks/useLiveStats";
-import { backendApi } from "@/core/backendApi";
+import { backendApi, type CameraPreviewPipeline, type CameraPreviewResponse } from "@/core/backendApi";
 import { toast } from "sonner";
 
 type QualityCheckKey = "barcode" | "date" | "anomaly";
@@ -91,6 +91,10 @@ const GMCBQualite = () => {
   const [sessionChecksModalOpen, setSessionChecksModalOpen] = useState(false);
   const [sessionChecksDraft, setSessionChecksDraft] = useState<QualityChecks>({ barcode: true, date: true, anomaly: true });
   const [savingSessionChecks, setSavingSessionChecks] = useState(false);
+  const [cameraPreviewOpen, setCameraPreviewOpen] = useState(false);
+  const [cameraPreviewLoading, setCameraPreviewLoading] = useState(false);
+  const [cameraSwapLoading, setCameraSwapLoading] = useState(false);
+  const [cameraPreview, setCameraPreview] = useState<CameraPreviewResponse | null>(null);
 
   // Defect type → French label
   const defectLabel = (t: string) =>
@@ -256,6 +260,123 @@ const GMCBQualite = () => {
       camOk: stats.p1?.camera_available !== false,
     },
   ];
+
+  const selectedPipelineIdsForStart = () => {
+    const ids: string[] = [];
+    if (qualiteChecks.barcode || qualiteChecks.date) ids.push("pipeline_barcode_date");
+    if (qualiteChecks.anomaly) ids.push("pipeline_anomaly");
+    return ids;
+  };
+
+  const isStartPipelineActive = (pipelineId: string) => {
+    if (pipelineId === "pipeline_barcode_date") return qualiteChecks.barcode || qualiteChecks.date;
+    if (pipelineId === "pipeline_anomaly") return qualiteChecks.anomaly;
+    return true;
+  };
+
+  const getPreviewModeLabel = (pipeline: CameraPreviewPipeline) => {
+    if (pipeline.id === "pipeline_barcode_date") {
+      if (qualiteChecks.barcode && qualiteChecks.date) return "Code-barres + Date";
+      if (qualiteChecks.barcode) return "Code-barres";
+      if (qualiteChecks.date) return "Date";
+      return "Code-barres + Date";
+    }
+    if (pipeline.id === "pipeline_anomaly") return "Anomalie";
+    return pipeline.checkpoint_label || pipeline.label;
+  };
+
+  const getPreviewErrorLabel = (error?: string | null) => {
+    if (error === "camera_unavailable") return "Caméra inaccessible";
+    if (error === "no_frame") return "Aucune image reçue";
+    if (error === "stream_warming_up") return "Flux en préparation";
+    if (error === "encode_failed") return "Image non encodable";
+    return "Snapshot indisponible";
+  };
+
+  const activePreviewHasMissingCamera = () => {
+    if (!cameraPreview) return true;
+    return cameraPreview.pipelines.some((pipeline) => isStartPipelineActive(pipeline.id) && !pipeline.available);
+  };
+
+  const openCameraPreviewStep = async () => {
+    if (!hasSelectedQualityCheck) {
+      toast.error("Activez au moins un contrôle avant de démarrer.");
+      return;
+    }
+    setCameraPreviewLoading(true);
+    try {
+      const preview = await backendApi.getCameraPreview();
+      setCameraPreview(preview);
+      setCameraPreviewOpen(true);
+    } catch {
+      toast.error("Impossible de récupérer les snapshots caméra. Vérifiez la connexion au système.");
+    } finally {
+      setCameraPreviewLoading(false);
+    }
+  };
+
+  const swapPreviewCameras = async () => {
+    if (!cameraPreview) return;
+    const barcodePipeline = cameraPreview.pipelines.find((pipeline) => pipeline.id === "pipeline_barcode_date");
+    const anomalyPipeline = cameraPreview.pipelines.find((pipeline) => pipeline.id === "pipeline_anomaly");
+    if (!barcodePipeline || !anomalyPipeline) {
+      toast.error("Configuration caméra incomplète — impossible d'inverser.");
+      return;
+    }
+
+    setCameraSwapLoading(true);
+    try {
+      await backendApi.setCameraAssignments({
+        [barcodePipeline.id]: anomalyPipeline.camera_source,
+        [anomalyPipeline.id]: barcodePipeline.camera_source,
+      }, { restart: false });
+      const refreshedPreview = await backendApi.getCameraPreview();
+      setCameraPreview(refreshedPreview);
+      toast.success("Caméras inversées. Vérifiez à nouveau les images.");
+    } catch {
+      toast.error("Impossible d'inverser les caméras. Réessayez avant de démarrer.");
+    } finally {
+      setCameraSwapLoading(false);
+    }
+  };
+
+  const startSessionAfterPreview = async () => {
+    if (!hasSelectedQualityCheck) {
+      toast.error("Activez au moins un contrôle avant de démarrer.");
+      return;
+    }
+
+    const scheduled = startMode === "scheduled";
+    if (scheduled && !stopTimeForStart) {
+      toast.error("Choisissez une heure d'arrêt automatique.");
+      return;
+    }
+
+    setStartingSession(true);
+    if (scheduled) setSchedulingSession(true);
+    try {
+      await backendApi.sessionStart(qualiteChecks);
+      if (scheduled && stopTimeForStart) {
+        const r = await backendApi.scheduleStop(stopTimeForStart);
+        setScheduledStop(r.scheduled_stop);
+        toast.success(`Session démarrée — arrêt automatique ${formatStopCountdown(r.scheduled_stop)}.`);
+      }
+      setCameraPreviewOpen(false);
+      setCameraPreview(null);
+      setStartMode(null);
+      setStopTimeForStart("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("camera_unavailable")) {
+        toast.error("Caméra inaccessible — vérifiez qu'elle est bien branchée et réessayez.", { duration: 8000 });
+      } else {
+        toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
+      }
+    } finally {
+      setStartingSession(false);
+      setSchedulingSession(false);
+    }
+  };
 
   const openSessionChecksModal = () => {
     setStopPickerOpen(false);
@@ -436,25 +557,11 @@ const GMCBQualite = () => {
                       Annuler
                     </button>
                     <button
-                      disabled={startingSession || !hasSelectedQualityCheck}
-                      onClick={async () => {
-                        setStartingSession(true);
-                        try {
-                          const ep: string[] = [];
-                          if (qualiteChecks.barcode || qualiteChecks.date) ep.push("pipeline_barcode_date");
-                          if (qualiteChecks.anomaly) ep.push("pipeline_anomaly");
-                          await backendApi.startAll(undefined, ep, qualiteChecks);
-                          await backendApi.toggleRecording();
-                          setStartMode(null);
-                        } catch {
-                          toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
-                        } finally {
-                          setStartingSession(false);
-                        }
-                      }}
-                      style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: startingSession ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (startingSession || !hasSelectedQualityCheck) ? 0.5 : 1 }}
+                      disabled={startingSession || cameraPreviewLoading || !hasSelectedQualityCheck}
+                      onClick={openCameraPreviewStep}
+                      style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 700, cursor: (startingSession || cameraPreviewLoading) ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (startingSession || cameraPreviewLoading || !hasSelectedQualityCheck) ? 0.5 : 1 }}
                     >
-                      {startingSession ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer
+                      {startingSession || cameraPreviewLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer
                     </button>
                   </div>
                 </div>
@@ -495,38 +602,102 @@ const GMCBQualite = () => {
                       Annuler
                     </button>
                     <button
-                      disabled={startingSession || schedulingSession || !hasSelectedQualityCheck || !stopTimeForStart}
-                      onClick={async () => {
-                        setSchedulingSession(true);
-                        try {
-                          const ep: string[] = [];
-                          if (qualiteChecks.barcode || qualiteChecks.date) ep.push("pipeline_barcode_date");
-                          if (qualiteChecks.anomaly) ep.push("pipeline_anomaly");
-                          await backendApi.startAll(undefined, ep, qualiteChecks);
-                          await backendApi.toggleRecording();
-                          if (stopTimeForStart) {
-                            const r = await backendApi.scheduleStop(stopTimeForStart);
-                            setScheduledStop(r.scheduled_stop);
-                            toast.success(`Session démarrée — arrêt automatique ${formatStopCountdown(r.scheduled_stop)}.`);
-                          }
-                          setStartMode(null);
-                          setStopTimeForStart("");
-                        } catch {
-                          toast.error("Impossible de démarrer la session. Vérifiez que le système est en ligne.");
-                        } finally {
-                          setStartingSession(false);
-                          setSchedulingSession(false);
-                        }
-                      }}
-                      style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#b45309", color: "#fff", fontSize: 13, fontWeight: 700, cursor: schedulingSession ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (schedulingSession || !hasSelectedQualityCheck || !stopTimeForStart) ? 0.5 : 1 }}
+                      disabled={startingSession || schedulingSession || cameraPreviewLoading || !hasSelectedQualityCheck || !stopTimeForStart}
+                      onClick={openCameraPreviewStep}
+                      style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#b45309", color: "#fff", fontSize: 13, fontWeight: 700, cursor: (schedulingSession || cameraPreviewLoading) ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (schedulingSession || cameraPreviewLoading || !hasSelectedQualityCheck || !stopTimeForStart) ? 0.5 : 1 }}
                     >
-                      {schedulingSession ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer et lancer
+                      {schedulingSession || cameraPreviewLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer et lancer
                     </button>
                   </div>
                 </div>
               </>
             )}
 
+          </div>
+        </div>
+      )}
+      {cameraPreviewOpen && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(2,6,23,0.88)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", zIndex: 230, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
+          <div style={{ background: "#fff", borderRadius: 24, padding: 24, width: "min(920px, 94vw)", maxHeight: "92vh", overflow: "auto", boxShadow: "0 36px 120px rgba(0,0,0,0.55)", border: "1px solid #e5e7eb" }}>
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, marginBottom: 18 }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>Confirmation des caméras</div>
+                <div style={{ fontSize: 13, color: "#64748b" }}>Vérifiez que chaque caméra correspond au mode affiché avant de lancer la session.</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { if (!startingSession && !cameraSwapLoading) { setCameraPreviewOpen(false); setCameraPreview(null); } }}
+                disabled={startingSession || cameraSwapLoading}
+                style={{ width: 34, height: 34, borderRadius: 10, border: "1px solid #e5e7eb", background: "#fff", cursor: startingSession || cameraSwapLoading ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", flexShrink: 0, opacity: startingSession || cameraSwapLoading ? 0.55 : 1 }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14, marginBottom: 18 }}>
+              {(cameraPreview?.pipelines ?? []).map((pipeline) => {
+                const active = isStartPipelineActive(pipeline.id);
+                return (
+                  <div key={pipeline.id} style={{ border: `1px solid ${!pipeline.available && active ? "#fecaca" : active ? "#99f6e4" : "#e2e8f0"}`, borderRadius: 12, padding: 12, background: active ? "#fff" : "#f8fafc", opacity: active ? 1 : 0.72 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                      <div style={{ fontSize: 14, fontWeight: 800, color: active ? "#0f172a" : "#64748b" }}>{getPreviewModeLabel(pipeline)}</div>
+                      <span style={{ flexShrink: 0, borderRadius: 999, padding: "3px 8px", background: active ? "#d1fae5" : "#e2e8f0", color: active ? "#047857" : "#64748b", fontSize: 11, fontWeight: 800 }}>
+                        {active ? "Actif" : "Désactivé"}
+                      </span>
+                    </div>
+                    <div style={{ aspectRatio: "4 / 3", borderRadius: 10, overflow: "hidden", background: "#0f172a", border: "1px solid #e2e8f0", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      {pipeline.snapshot ? (
+                        <img src={pipeline.snapshot} alt={`Preview ${getPreviewModeLabel(pipeline)}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      ) : (
+                        <div style={{ color: "#cbd5e1", display: "flex", flexDirection: "column", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700 }}>
+                          <Camera size={26} />
+                          <span>{getPreviewErrorLabel(pipeline.error)}</span>
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 10 }}>
+                      <span style={{ fontSize: 12, color: "#64748b", fontWeight: 700 }}>Caméra {String(pipeline.camera_source)}</span>
+                      <span style={{ fontSize: 12, color: pipeline.available ? "#047857" : "#dc2626", fontWeight: 800 }}>
+                        {pipeline.available ? "Image reçue" : getPreviewErrorLabel(pipeline.error)}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {activePreviewHasMissingCamera() && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, padding: "10px 12px", borderRadius: 10, background: "#fef2f2", border: "1px solid #fecaca", color: "#dc2626", fontSize: 13, fontWeight: 700 }}>
+                <AlertCircle size={15} /> Une caméra active n'a pas fourni d'image. Corrigez la connexion ou utilisez Swap si les caméras sont inversées.
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={() => { setCameraPreviewOpen(false); setCameraPreview(null); }}
+                disabled={startingSession || schedulingSession || cameraSwapLoading}
+                style={{ border: "1px solid #d0d5dd", borderRadius: 10, padding: "9px 16px", background: "#fff", color: "#475467", fontSize: 13, fontWeight: 700, cursor: startingSession || schedulingSession || cameraSwapLoading ? "not-allowed" : "pointer", opacity: startingSession || schedulingSession || cameraSwapLoading ? 0.55 : 1 }}
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                onClick={swapPreviewCameras}
+                disabled={startingSession || schedulingSession || cameraSwapLoading}
+                style={{ border: "1px solid #c7d2fe", borderRadius: 10, padding: "9px 16px", background: "#eef2ff", color: "#4338ca", fontSize: 13, fontWeight: 800, cursor: cameraSwapLoading ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: startingSession || schedulingSession || cameraSwapLoading ? 0.6 : 1 }}
+              >
+                {cameraSwapLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <ArrowLeftRight size={15} />} Swap
+              </button>
+              <button
+                type="button"
+                disabled={startingSession || schedulingSession || cameraSwapLoading}
+                onClick={startSessionAfterPreview}
+                style={{ border: "none", borderRadius: 10, padding: "9px 16px", background: "#0f766e", color: "#fff", fontSize: 13, fontWeight: 800, cursor: startingSession || schedulingSession ? "wait" : "pointer", display: "flex", alignItems: "center", gap: 8, opacity: (startingSession || schedulingSession || cameraSwapLoading) ? 0.5 : 1 }}
+              >
+                {startingSession || schedulingSession ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <PlayCircle size={15} />} Confirmer
+              </button>
+            </div>
           </div>
         </div>
       )}

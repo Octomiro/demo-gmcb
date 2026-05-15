@@ -406,6 +406,26 @@ export const pipelineStatsApi = {
   },
 };
 
+export interface CameraPreviewPipeline {
+  id: string;
+  label: string;
+  checkpoint_id: string;
+  checkpoint_label: string;
+  mode: string;
+  camera_source: string | number;
+  snapshot: string | null;
+  available: boolean;
+  error?: string | null;
+}
+
+export interface CameraPreviewResponse {
+  generated_at: string;
+  snapshots: Record<string, string>;
+  errors: Record<string, string>;
+  cameras: Array<{ id: string; label: string; source: string | number }>;
+  pipelines: CameraPreviewPipeline[];
+}
+
 // ─── Exit-line endpoints ──────────────────────────────────────────────────────
 
 export const exitLineApi = {
@@ -527,14 +547,17 @@ export const backendApi = {
     }>;
     pipeline_sources: Record<string, number | string>;
   }> => request("GET", "/cameras/detect"),
+  getCameraPreview: (): Promise<CameraPreviewResponse> =>
+    request("GET", "/system/camera-preview"),
 
   // Camera assignment overrides
   getCameraAssignments: (): Promise<{ assignments: Record<string, number | string> }> =>
     request("GET", "/cameras/assignments"),
-  setCameraAssignments: (assignments: Record<string, number | string>): Promise<{
+  setCameraAssignments: (assignments: Record<string, number | string>, options?: { restart?: boolean }): Promise<{
     assignments: Record<string, number | string>;
     restarted: string[];
-  }> => request("POST", "/cameras/assignments", { assignments }),
+    restart: boolean;
+  }> => request("POST", "/cameras/assignments", { assignments, ...(options ?? {}) }),
 
   // Session crossings
   getCrossings: (sessionId: string, limit = 10) => statsApi.getCrossings(sessionId, limit),
