@@ -3,6 +3,7 @@ monkey.patch_all(thread=False, queue=False, subprocess=False, signal=False, os=F
 import gevent
 
 import atexit
+import base64
 import io
 import json
 import logging
@@ -1209,6 +1210,7 @@ def api_camera_assignments_set():
     """
     data = request.get_json(force=True, silent=True) or {}
     new_assignments = data.get("assignments", {})
+    restart_running = bool(data.get("restart", True))
     if not isinstance(new_assignments, dict) or not new_assignments:
         return jsonify({"error": "assignments dict required"}), 400
 
@@ -1224,37 +1226,49 @@ def api_camera_assignments_set():
     _save_assignments(existing)
     _apply_assignments(existing)
 
-    # Phase 1: stop ALL affected pipelines before opening any new camera source.
-    # This prevents the case where pipeline A is started on cam_B while pipeline B
-    # still holds cam_B (V4L2 is exclusive — second open would fail).
-    stop_info = {}  # pid → was_recording
+    # Phase 1: stop affected pipelines only when the caller wants running
+    # pipelines to move immediately. Preview-only swaps persist config without
+    # unexpectedly launching cameras/models before the session is confirmed.
+    stop_info = {}
     for pid in new_assignments:
         st = pipelines.get(pid)
         if st is None:
             continue
-        stop_info[pid] = getattr(st, '_stats_active', False)
-        if st.is_running:
+        stop_info[pid] = {
+            "was_running": bool(st.is_running),
+            "was_recording": bool(getattr(st, '_stats_active', False)),
+            "enabled_checks": dict(getattr(st, '_enabled_checks', {"barcode": True, "date": True, "anomaly": True})),
+        }
+        if restart_running and st.is_running:
             st.stop_processing()
 
-    # Phase 2: start each pipeline on its new source
+    # Phase 2: restart only pipelines that were already running.
     restarted = []
     for pid, new_src in new_assignments.items():
         st = pipelines.get(pid)
         if st is None:
             continue
-        was_recording = stop_info.get(pid, False)
+        info = stop_info.get(pid, {})
+        if not restart_running or not info.get("was_running"):
+            continue
         res = st.start_processing(new_src)
         if res.get("status") == "started":
             restarted.append(pid)
         # Re-enable stats recording if it was active
-        if was_recording:
+        if info.get("was_recording"):
             group_id = pipeline_manager._active_session_group or ""
             shift_id = pipeline_manager._active_session_shift_id or ""
-            st.set_stats_recording(True, group_id=group_id, shift_id=shift_id)
+            st.set_stats_recording(
+                True,
+                group_id=group_id,
+                shift_id=shift_id,
+                enabled_checks=info.get("enabled_checks"),
+            )
 
     return jsonify({
         "assignments": {p["id"]: p["camera_source"] for p in PIPELINES},
         "restarted": restarted,
+        "restart": restart_running,
     })
 
 
@@ -2097,6 +2111,117 @@ def _signal_shutdown(sig, frame):
 atexit.register(_shutdown)
 for _sig in (signal.SIGTERM, signal.SIGINT):
     signal.signal(_sig, _signal_shutdown)
+
+
+def _preview_source_key(source):
+    return str(source)
+
+def _normalize_preview_source(source):
+    if isinstance(source, str) and source.isdigit():
+        return int(source)
+    return source
+
+
+def _capture_preview_jpeg(source, width=640, height=480):
+    """Open a camera briefly and return one JPEG frame, without starting models."""
+    src = _normalize_preview_source(source)
+    cap = cv2.VideoCapture(src, cv2.CAP_V4L2) if isinstance(src, int) else cv2.VideoCapture(src)
+    try:
+        if not cap.isOpened():
+            return None, "camera_unavailable"
+
+        if isinstance(src, int):
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        frame = None
+        for _ in range(8):
+            ok, candidate = cap.read()
+            if ok and candidate is not None:
+                frame = candidate
+
+        if frame is None:
+            return None, "no_frame"
+
+        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not ok:
+            return None, "encode_failed"
+        return buf.tobytes(), None
+    finally:
+        cap.release()
+
+
+@app.route('/api/system/camera-preview', methods=['GET'])
+@app.route('/api/cameras/preview', methods=['GET'])
+def api_cameras_preview():
+    """Return lightweight snapshots for the configured pipeline cameras."""
+    snapshots = {}
+    errors = {}
+    active_sources = {}
+
+    for _, st in _all_states():
+        if st.is_running:
+            active_sources[_preview_source_key(st.video_source)] = st
+
+    sources = []
+    seen = set()
+    for pipe_cfg in PIPELINES:
+        source = pipe_cfg.get("camera_source")
+        key = _preview_source_key(source)
+        if key not in seen:
+            seen.add(key)
+            sources.append(source)
+
+    for source in sources:
+        key = _preview_source_key(source)
+        jpeg_bytes = None
+
+        if key in active_sources:
+            st = active_sources[key]
+            deadline = time.monotonic() + 1.2
+            while time.monotonic() < deadline:
+                with st._jpeg_lock:
+                    jpeg_bytes = st._jpeg_bytes_low or st._jpeg_bytes
+                if jpeg_bytes is not None:
+                    break
+                gevent.sleep(0.05)
+            if jpeg_bytes is None:
+                errors[key] = "stream_warming_up"
+        else:
+            jpeg_bytes, error = _capture_preview_jpeg(source)
+            if error:
+                errors[key] = error
+
+        if jpeg_bytes is not None:
+            b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
+            snapshots[key] = f"data:image/jpeg;base64,{b64}"
+
+    pipeline_previews = []
+    for pipe_cfg in PIPELINES:
+        source = pipe_cfg.get("camera_source")
+        key = _preview_source_key(source)
+        checkpoint = get_checkpoint(pipe_cfg.get("checkpoint_id")) or {}
+        pipeline_previews.append({
+            "id": pipe_cfg["id"],
+            "label": pipe_cfg.get("label", pipe_cfg["id"]),
+            "checkpoint_id": pipe_cfg.get("checkpoint_id"),
+            "checkpoint_label": checkpoint.get("label", ""),
+            "mode": checkpoint.get("mode", ""),
+            "camera_source": source,
+            "snapshot": snapshots.get(key),
+            "available": key in snapshots,
+            "error": errors.get(key),
+        })
+
+    return jsonify({
+        "generated_at": datetime.now(_TUNIS_TZ).isoformat(),
+        "snapshots": snapshots,
+        "errors": errors,
+        "cameras": CAMERAS,
+        "pipelines": pipeline_previews,
+    })
 
 
 if __name__ == '__main__':
